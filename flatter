@@ -36,7 +36,36 @@ import subprocess
 import sys
 
 import tkinter.filedialog
+import tkinter.messagebox
 
+
+class Result:
+    def __init__(self, val=None, err=None):
+        self.val = val
+        self.err = err
+
+    def __bool__(self):
+        return not bool(self.err)
+
+    def error(err):
+        return Result(None, err)
+
+
+class DoInExistingDir(object):
+    def __init__(self, path):
+        self.old_dir = os.getcwd()
+        self.new_dir = path
+
+    def __enter__(self):
+        try:
+            os.chdir(self.new_dir)
+            return self
+        except:
+            return None
+
+    def __exit__(self, type, value, traceback):
+        os.chdir(self.old_dir)
+        return isinstance(value, OSError)
 
 def exec_proc(cmd, capture_output=True):
     sys.stdout.flush()
@@ -58,6 +87,12 @@ def exec_proc(cmd, capture_output=True):
         return subprocess.call(cmd, shell=shell)
 
 
+def get_lines(text):
+    lines = text.split('\n') if text else []
+    lines = [line.strip() for line in lines]
+    return lines
+
+
 def get_home_dir():
     # posix
     if 'HOME' in os.environ:
@@ -72,6 +107,11 @@ def get_home_dir():
         return os.path.abspath('.')
 
 
+def get_git_hash(ref):
+    (ret, out, err) = exec_proc(['git', 'rev-parse', ref])
+    return out.strip() if ret == 0 else None
+
+
 class Flatter:
     def __init__(self):
         self.home_dir = get_home_dir()
@@ -82,19 +122,23 @@ class Flatter:
     def get_last_path(self):
         return self.last_path
 
-    def set_last_path(self, p):
-        if not p:
+    def set_last_path(self, path):
+        if not path:
             return
 
-        self.last_path = p
-        if p in self.recent_paths:
-            self.recent_paths.remove(p)
-        self.recent_paths.insert(0, p)
+        self.last_path = path
+        if path in self.recent_paths:
+            self.recent_paths.remove(path)
+        self.recent_paths.insert(0, path)
         self.recent_paths = self.recent_paths[:20]
-        print(self.recent_paths)
 
     def get_recent_paths(self):
         return self.recent_paths[:]
+
+    def remove_recent(self, path):
+        if path in self.recent_paths:
+            self.recent_paths.remove(path)
+            self.write_config()
 
     def read_config(self):
         if not self.home_dir:
@@ -137,11 +181,48 @@ class Flatter:
         with open(cfg_file_name, 'w') as configfile:
             config.write(configfile)
 
-    def open_dir(self, path):
-        print('opening', path)
+    def do_open_dir(self, path):
+        if not path or not type(path) is str:
+            return Result.error('bad path: "%s"' % str(path))
+
+        (ret, out, err) = exec_proc('git status')
+        if ret != 0:
+            return Result.error(err)
+
+        lines = get_lines(out)
+        if not lines:
+            err_txt = 'git status didn\'t return anything in path: %s' % path
+            return Result.error(err_txt)
+
+        detatched_marker = 'HEAD detached at '
+        branch_marker = 'On branch '
+        if lines[0].startswith(detatched_marker):
+            branch = lines[0]
+            commit = lines[0][len(detatched_marker):]
+        elif lines[0].startswith(branch_marker):
+            branch = lines[0][len(branch_marker):]
+            commit = get_git_hash('HEAD')
+        else:
+            err_txt = (
+                'bad git output:\n' +
+                '  out: %s\n' +
+                '  err: %s\n') % out, err
+            return Result.error(err_txt)
+
+        print('successfully opened path:', path)
+        print('  branch:', branch)
+        print('  commit:', commit)
+
         self.set_last_path(path)
         self.write_config()
-        return True
+        return Result()
+
+    def open_dir(self, path):
+        with DoInExistingDir(path) as ctx:
+            if ctx:
+                return self.do_open_dir(path)
+            else:
+                return Result.error('missing repo: %s' % path)
 
 
 class FlatterFrame(tk.Frame):
@@ -203,6 +284,8 @@ class FlatterWin:
         file_menu.add_command(label='Open Repo', command=self.ask_open_dir)
         open_recents_menu = tk.Menu(file_menu, tearoff=0)
         file_menu.add_cascade(label='Open Recent', menu=open_recents_menu)
+        file_menu.add_command(
+            label='Refresh', command=self.refresh_repo, state='disabled')
         file_menu.add_separator()
         file_menu.add_command(label='Exit', command=self.on_destroy)
 
@@ -227,28 +310,43 @@ class FlatterWin:
         # generator fn to correcty capture value of "recent" in closure
         def make_cmd():
             recent2 = recent
-            return lambda: self.open_dir(recent2)
+            return lambda: self.open_dir(recent2, from_recent=True)
 
         for recent in recents:
             self.open_recents_menu.add_command(
                 label=recent,
                 command=make_cmd())
 
-
     def ask_open_dir(self):
-        path = tk.filedialog.askdirectory(initialdir=get_home_dir())
+        path = tk.filedialog.askdirectory(
+            initialdir=self.flatter.get_last_path())
         if path:
             self.open_dir(path)
 
+    def refresh_repo(self):
+        self.open_dir(self.flatter.get_last_path())
 
-    def open_dir(self, path):
+    def open_dir(self, path, from_recent=False):
         if not path:
             return
 
-        if not self.flatter.open_dir(path):
-            return
+        result = self.flatter.open_dir(path)
+        if not result:
+            title = 'Couldn\'t open repo'
+            if from_recent:
+                err_txt = (result.err + '\n\n' +
+                    'Remove from recent repos?')
+                remove_recent = tk.messagebox.askquestion(
+                    title, result.err,
+                    icon=tk.messagebox.ERROR)
+                if remove_recent == tk.messagebox.YES:
+                    self.flatter.remove_recent(path)
+            else:
+                tk.messagebox.showerror(title, result.err)
 
         self.update_open_recent_menu()
+        state = 'normal' if result else 'disabled'
+        self.file_menu.entryconfig('Refresh', state=state)
 
 
 if __name__ == '__main__':
