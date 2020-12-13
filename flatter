@@ -24,13 +24,18 @@
 # SOFTWARE.
 ################################################################################
 
-import subprocess
-import sys
-
 try:
     import tkinter as tk
 except ModuleNotFoundError:
-    sys.exit("error: tkinter not found. You may need to 'pip install tk'.")
+    sys.exit('error: tkinter not found. You may need to "pip install tk".')
+
+import collections
+import configparser
+import os
+import subprocess
+import sys
+
+import tkinter.filedialog
 
 
 def exec_proc(cmd, capture_output=True):
@@ -51,6 +56,92 @@ def exec_proc(cmd, capture_output=True):
         return p.returncode, out, err
     else:
         return subprocess.call(cmd, shell=shell)
+
+
+def get_home_dir():
+    # posix
+    if 'HOME' in os.environ:
+        return os.environ['HOME']
+    # windows
+    elif 'HOMEPATH' in os.environ:
+        drive = os.environ['HOMEDRIVE'] if 'HOMEDRIVE' in os.environ else ''
+        path = os.environ['HOMEPATH']
+        return os.path.join(drive, path)
+    # ???
+    else:
+        return os.path.abspath('.')
+
+
+class Flatter:
+    def __init__(self):
+        self.home_dir = get_home_dir()
+        self.last_path = self.home_dir
+        self.recent_paths = []
+        self.read_config()
+
+    def get_last_path(self):
+        return self.last_path
+
+    def set_last_path(self, p):
+        if not p:
+            return
+
+        self.last_path = p
+        if p in self.recent_paths:
+            self.recent_paths.remove(p)
+        self.recent_paths.insert(0, p)
+        self.recent_paths = self.recent_paths[:20]
+        print(self.recent_paths)
+
+    def get_recent_paths(self):
+        return self.recent_paths[:]
+
+    def read_config(self):
+        if not self.home_dir:
+            return
+
+        cfg_file_name = os.path.join(self.home_dir, '.flatter')
+        config = configparser.ConfigParser()
+        config.read(cfg_file_name)
+
+        if config.has_section('paths'):
+            self.last_path = config.get(
+                'paths', 'last_path', fallback=self.last_path)
+
+            recents = [item for item in config.items('paths')
+                if item[0].startswith('recent_path_')]
+            recents.sort(key=lambda pair : pair[0])
+            self.recent_paths = [item[1] for item in recents]
+
+    def write_config(self):
+        if not self.home_dir:
+            return
+
+        paths = collections.OrderedDict()
+        if self.last_path:
+            paths['last_path'] = self.last_path
+
+        idx = 0
+        for recent_path in self.recent_paths:
+            key = 'recent_path_%02d' % idx
+            paths[key] = recent_path
+            idx += 1
+
+        cfg = collections.OrderedDict()
+        cfg['paths'] = paths
+
+        config = configparser.ConfigParser()
+        config.read_dict(cfg)
+
+        cfg_file_name = os.path.join(self.home_dir, '.flatter')
+        with open(cfg_file_name, 'w') as configfile:
+            config.write(configfile)
+
+    def open_dir(self, path):
+        print('opening', path)
+        self.set_last_path(path)
+        self.write_config()
+        return True
 
 
 class FlatterFrame(tk.Frame):
@@ -86,18 +177,19 @@ class FlatterWin:
         if root is None:
             root = tk.Tk()
         self.root = root
+        self.flatter = Flatter()
 
-        root.wm_title("Flatter!")
+        root.wm_title('Flatter!')
 
         w = root.winfo_screenwidth() / 2
         h = root.winfo_screenheight() / 2
         root.geometry('%dx%d' % (w, h))
 
+        root.protocol('WM_DELETE_WINDOW', self.on_destroy)
+
         self.init_menu()
 
-        frame = FlatterFrame(root)
-
-        root.protocol('WM_DELETE_WINDOW', self.on_destroy)
+        FlatterFrame(root)
 
         root.mainloop()
 
@@ -106,18 +198,57 @@ class FlatterWin:
         sys.exit()
 
     def init_menu(self):
-        def donothing():
-            print("do nothing!")
+        menu_bar = tk.Menu(self.root)
+        file_menu = tk.Menu(menu_bar, tearoff=0)
+        file_menu.add_command(label='Open Repo', command=self.ask_open_dir)
+        open_recents_menu = tk.Menu(file_menu, tearoff=0)
+        file_menu.add_cascade(label='Open Recent', menu=open_recents_menu)
+        file_menu.add_separator()
+        file_menu.add_command(label='Exit', command=self.on_destroy)
 
-        menubar = tk.Menu(self.root)
-        filemenu = tk.Menu(menubar, tearoff=0)
-        filemenu.add_command(label="New", command=donothing)
-        filemenu.add_separator()
-        filemenu.add_command(label="Exit", command=self.on_destroy)
+        menu_bar.add_cascade(label='File', menu=file_menu)
 
-        menubar.add_cascade(label="File", menu=filemenu)
+        self.root.config(menu=menu_bar)
+        self.file_menu = file_menu
+        self.open_recents_menu = open_recents_menu
 
-        self.root.config(menu=menubar)
+        self.update_open_recent_menu()
+
+    def update_open_recent_menu(self):
+        self.open_recents_menu.delete(0, 'end')
+
+        recents = self.flatter.get_recent_paths()
+        state = 'normal' if recents else 'disabled'
+        self.file_menu.entryconfig('Open Recent', state=state)
+
+        if not recents:
+            return
+
+        # generator fn to correcty capture value of "recent" in closure
+        def make_cmd():
+            recent2 = recent
+            return lambda: self.open_dir(recent2)
+
+        for recent in recents:
+            self.open_recents_menu.add_command(
+                label=recent,
+                command=make_cmd())
+
+
+    def ask_open_dir(self):
+        path = tk.filedialog.askdirectory(initialdir=get_home_dir())
+        if path:
+            self.open_dir(path)
+
+
+    def open_dir(self, path):
+        if not path:
+            return
+
+        if not self.flatter.open_dir(path):
+            return
+
+        self.update_open_recent_menu()
 
 
 if __name__ == '__main__':
