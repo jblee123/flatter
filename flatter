@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+
+################################################################################
+# The MIT License (MIT)
+
+# Copyright (c) 2020 J. Brian Lee
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+################################################################################
+
+import subprocess
+import sys
+
+try:
+    import tkinter as tk
+except ModuleNotFoundError:
+    sys.exit("error: tkinter not found. You may need to 'pip install tk'.")
+
+
+def exec_proc(cmd, capture_output=True):
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    shell = type(cmd) == str
+
+    if capture_output:
+        p = subprocess.Popen(
+            cmd,
+            shell=shell,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE)
+        out, err = p.communicate()
+        out = out.decode('utf-8').strip()
+        err = err.decode('utf-8').strip()
+        return p.returncode, out, err
+    else:
+        return subprocess.call(cmd, shell=shell)
+
+
+class FlatterFrame(tk.Frame):
+    def __init__(self, parent=None):
+        tk.Frame.__init__(self, parent)
+
+        self.pack(expand=tk.YES, fill=tk.BOTH)            # make me expandable
+
+        self.init_canvas()
+
+    def init_canvas(self):
+        canvas = tk.Canvas(self, bg='dark grey')
+        # canvas.config(scrollregion=(0, 0, 500, 500))      # canvas size corners
+        canvas.config(highlightthickness=0)               # no pixels to border
+
+        vertical = tk.Scrollbar(self)
+        vertical.config(command=canvas.yview)             # xlink sbar and canv
+        canvas.config(yscrollcommand=vertical.set)        # move one moves other
+        vertical.pack(side=tk.RIGHT, fill=tk.Y)           # pack first=clip last
+
+        horizontal = tk.Scrollbar(self, orient=tk.HORIZONTAL)
+        horizontal.config(command=canvas.xview)           # xlink sbar and canv
+        canvas.config(xscrollcommand=horizontal.set)      # move one moves other
+        horizontal.pack(side=tk.BOTTOM, fill=tk.X)        # pack first=clip last
+
+        canvas.pack(side=tk.LEFT, expand=tk.YES, fill=tk.BOTH) # canv clipped first
+
+        self.canvas = canvas
+
+
+class FlatterWin:
+    def __init__(self, root=None):
+        if root is None:
+            root = tk.Tk()
+        self.root = root
+
+        root.wm_title("Flatter!")
+
+        w = root.winfo_screenwidth() / 2
+        h = root.winfo_screenheight() / 2
+        root.geometry('%dx%d' % (w, h))
+
+        self.init_menu()
+
+        frame = FlatterFrame(root)
+
+        root.protocol('WM_DELETE_WINDOW', self.on_destroy)
+
+        root.mainloop()
+
+    def on_destroy(self):
+        self.root.destroy()
+        sys.exit()
+
+    def init_menu(self):
+        def donothing():
+            print("do nothing!")
+
+        menubar = tk.Menu(self.root)
+        filemenu = tk.Menu(menubar, tearoff=0)
+        filemenu.add_command(label="New", command=donothing)
+        filemenu.add_separator()
+        filemenu.add_command(label="Exit", command=self.on_destroy)
+
+        menubar.add_cascade(label="File", menu=filemenu)
+
+        self.root.config(menu=menubar)
+
+
+if __name__ == '__main__':
+    FlatterWin()
