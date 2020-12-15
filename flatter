@@ -202,6 +202,17 @@ class Flatter:
     def get_recent_paths(self):
         return self._recent_paths[:]
 
+    def get_root_sub(self):
+        return self._root_sub
+
+    def get_sub_depth(self):
+        def do_get_sub_depth(sub):
+            if len(sub.subs) == 0:
+                return 0
+            return max([do_get_sub_depth(child) for child in sub.subs]) + 1
+
+        return do_get_sub_depth(self._root_sub)
+
     def remove_recent(self, path):
         if path in self._recent_paths:
             self._recent_paths.remove(path)
@@ -253,6 +264,7 @@ class Flatter:
             if new_sub.path.startswith(sub.path + '/'):
                 self.insert_new_sub(sub, new_sub)
                 return
+        print('adding sub:', new_sub.name)
         root_sub.add_sub(new_sub)
 
     def build_submodule_tree(self):
@@ -336,7 +348,7 @@ class Flatter:
 
             i += 1
 
-        _root_sub = root_sub;
+        self._root_sub = root_sub;
 
         return Result()
 
@@ -392,9 +404,62 @@ class Flatter:
                 return Result.error('missing repo: %s' % path)
 
 
+class SubmodFrame(tk.Frame):
+    # self.name = name
+    # self.path = path
+    # self.indexed_hash = indexed_hash
+    # self.checked_out_hash = checked_out_hash
+    # self.indexed_descr = indexed_descr
+    # self.checked_out_descr = checked_out_descr
+    # self.initialized = initialized
+    # self.merge_conflicts = merge_conflicts
+    # self.subs = []
+
+    def __init__(self, submodule, *args, **kwargs):
+        super(SubmodFrame, self).__init__(*args, **kwargs)
+        # print('submodule:', str(submodule))
+        # print('args:', str(args))
+        # print('kwargs:', str(kwargs))
+        self.submodule = submodule
+
+        self.config(bg='light grey')
+        self.config(highlightbackground='black')
+        self.config(highlightthickness=1)
+
+        color='red'
+
+        def make_label(text):
+            var = tk.StringVar()
+            var.set(text)
+            label = tk.Label(self, textvariable=var)
+            label['bg'] = self['bg']
+            label.pack(anchor=tk.W)
+
+        make_label('Submodule: ' + submodule.name)
+        make_label('Path: ' + submodule.path)
+
+        indexed_str = 'At index: ' + submodule.indexed_hash[:8]
+        if submodule.indexed_descr:
+            indexed_str += ' (%s)' % submodule.indexed_descr
+        make_label(indexed_str)
+
+        checked_out_str = 'Checked out: '
+        if submodule.initialized:
+            checked_out_str += submodule.checked_out_hash[:8]
+            if submodule.checked_out_descr:
+                checked_out_str += ' (%s)' % submodule.checked_out_descr
+        else:
+            checked_out_str += '[uninitialized]'
+        make_label(checked_out_str)
+
+
+
 class FlatterFrame(tk.Frame):
     def __init__(self, parent=None):
         tk.Frame.__init__(self, parent)
+
+        self.flatter = None
+        self.submod_frames = []
 
         self.pack(expand=tk.YES, fill=tk.BOTH)            # make me expandable
 
@@ -419,6 +484,35 @@ class FlatterFrame(tk.Frame):
 
         self.canvas = canvas
 
+    def draw_sub(self, sub, depth, row):
+        if depth > -1:
+            frm = SubmodFrame(sub, self.canvas)
+            x = depth * 100 + 50
+            y = row * 100 + 50
+            self.canvas.create_window((x, y), window=frm, anchor = tk.NW)
+
+            self.submod_frames.append(frm)
+
+        row += 1
+        depth += 1
+
+        for child in sub.subs:
+            row = self.draw_sub(child, depth, row)
+        return row
+
+    def update_ui(self, flatter):
+        for submod_frame in self.submod_frames:
+            submod_frame.destroy()
+        self.submod_frames = []
+
+        self.flatter = flatter
+        root_sub = flatter.get_root_sub()
+        self.draw_sub(root_sub, -1, -1)
+
+        scroll_width = flatter.get_sub_depth() * 100 + (50 * 2)
+        scroll_height = len(self.submod_frames) * 100 + 50
+        self.canvas.config(scrollregion=(0, 0, scroll_width, scroll_height))
+
 
 class FlatterWin:
     def __init__(self, root=None):
@@ -437,7 +531,9 @@ class FlatterWin:
 
         self.init_menu()
 
-        FlatterFrame(root)
+        self.frame = FlatterFrame(root)
+
+        self.open_dir('D:/code/flatter/test_repos/blee/app1') # jbltemp
 
         root.mainloop()
 
@@ -515,6 +611,8 @@ class FlatterWin:
         state = 'normal' if self.flatter.get_is_open() else 'disabled'
         self.file_menu.entryconfig('Refresh', state=state)
 
+        if result:
+            self.frame.update_ui(self.flatter)
 
 if __name__ == '__main__':
     FlatterWin()
