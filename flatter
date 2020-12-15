@@ -32,6 +32,8 @@ except ModuleNotFoundError:
 import collections
 import configparser
 import os
+import pprint
+import re
 import subprocess
 import sys
 
@@ -41,11 +43,19 @@ import tkinter.messagebox
 
 class Result:
     def __init__(self, val=None, err=None):
-        self.val = val
-        self.err = err
+        self._val = val
+        self._err = err
 
     def __bool__(self):
-        return not bool(self.err)
+        return not bool(self._err)
+
+    def get_val(self):
+        if self._err:
+            raise RuntimeError('Getting Result value from error Result')
+        return self._val
+
+    def get_err(self):
+        return self._err
 
     def error(err):
         return Result(None, err)
@@ -53,18 +63,18 @@ class Result:
 
 class DoInExistingDir(object):
     def __init__(self, path):
-        self.old_dir = os.getcwd()
-        self.new_dir = path
+        self._old_dir = os.getcwd()
+        self._new_dir = path
 
     def __enter__(self):
         try:
-            os.chdir(self.new_dir)
+            os.chdir(self._new_dir)
             return self
         except:
             return None
 
     def __exit__(self, type, value, traceback):
-        os.chdir(self.old_dir)
+        os.chdir(self._old_dir)
         return isinstance(value, OSError)
 
 def exec_proc(cmd, capture_output=True):
@@ -89,7 +99,7 @@ def exec_proc(cmd, capture_output=True):
 
 def get_lines(text):
     lines = text.split('\n') if text else []
-    lines = [line.strip() for line in lines]
+    # lines = [line.strip() for line in lines]
     return lines
 
 
@@ -107,66 +117,123 @@ def get_home_dir():
         return os.path.abspath('.')
 
 
+def make_git_err_msg(cmd, out, err):
+    if type(cmd) == list:
+        cmd = ' '.join(cmd)
+    err_str = \
+        'git cmd failed: \"' + cmd + '\"\n' \
+        '  out: ' + out + '\n' \
+        '  err: ' + err
+    return Result.error(err_str)
+
 def get_git_hash(ref):
-    (ret, out, err) = exec_proc(['git', 'rev-parse', ref])
-    return out.strip() if ret == 0 else None
+    cmd = ['git', 'rev-parse', ref]
+    (ret, out, err) = exec_proc(cmd)
+    if ret == 0:
+        return Result(out.strip())
+    else:
+        return make_git_err_msg(cmd, out, err)
+
+
+def get_submodule_status(cached):
+    cmd = 'git submodule status --recursive'
+    if cached:
+        cmd += ' --cached'
+    (ret, out, err) = exec_proc(cmd)
+    if ret == 0:
+        return Result(get_lines(out.strip()))
+    else:
+        return make_git_err_msg(cmd, out, err)
+
+
+class Submodule:
+    def __init__(self,
+        name, path,
+        indexed_hash, checked_out_hash,
+        indexed_descr, checked_out_descr,
+        initialized, merge_conflicts):
+
+        self.name = name
+        self.path = path
+        self.indexed_hash = indexed_hash
+        self.checked_out_hash = checked_out_hash
+        self.indexed_descr = indexed_descr
+        self.checked_out_descr = checked_out_descr
+        self.initialized = initialized
+        self.merge_conflicts = merge_conflicts
+        self.subs = []
+
+    def add_sub(self, sub):
+        self.subs.append(sub)
 
 
 class Flatter:
     def __init__(self):
-        self.home_dir = get_home_dir()
-        self.last_path = self.home_dir
-        self.recent_paths = []
+        self._is_open = False
+        self._home_dir = get_home_dir()
+        self._last_path = self._home_dir
+        self._recent_paths = []
+        self._root_sub = self.create_root_sub()
         self.read_config()
 
+    def get_is_open(self):
+        return self._is_open
+
+    def create_root_sub(self):
+        return Submodule(
+            name='', path='',
+            indexed_hash='', checked_out_hash='',
+            indexed_descr='', checked_out_descr='',
+            initialized=False, merge_conflicts=False)
+
     def get_last_path(self):
-        return self.last_path
+        return self._last_path
 
     def set_last_path(self, path):
         if not path:
             return
 
-        self.last_path = path
-        if path in self.recent_paths:
-            self.recent_paths.remove(path)
-        self.recent_paths.insert(0, path)
-        self.recent_paths = self.recent_paths[:20]
+        self._last_path = path
+        if path in self._recent_paths:
+            self._recent_paths.remove(path)
+        self._recent_paths.insert(0, path)
+        self._recent_paths = self._recent_paths[:20]
 
     def get_recent_paths(self):
-        return self.recent_paths[:]
+        return self._recent_paths[:]
 
     def remove_recent(self, path):
-        if path in self.recent_paths:
-            self.recent_paths.remove(path)
+        if path in self._recent_paths:
+            self._recent_paths.remove(path)
             self.write_config()
 
     def read_config(self):
-        if not self.home_dir:
+        if not self._home_dir:
             return
 
-        cfg_file_name = os.path.join(self.home_dir, '.flatter')
+        cfg_file_name = os.path.join(self._home_dir, '.flatter')
         config = configparser.ConfigParser()
         config.read(cfg_file_name)
 
         if config.has_section('paths'):
-            self.last_path = config.get(
-                'paths', 'last_path', fallback=self.last_path)
+            self._last_path = config.get(
+                'paths', 'last_path', fallback=self._last_path)
 
             recents = [item for item in config.items('paths')
                 if item[0].startswith('recent_path_')]
             recents.sort(key=lambda pair : pair[0])
-            self.recent_paths = [item[1] for item in recents]
+            self._recent_paths = [item[1] for item in recents]
 
     def write_config(self):
-        if not self.home_dir:
+        if not self._home_dir:
             return
 
         paths = collections.OrderedDict()
-        if self.last_path:
-            paths['last_path'] = self.last_path
+        if self._last_path:
+            paths['last_path'] = self._last_path
 
         idx = 0
-        for recent_path in self.recent_paths:
+        for recent_path in self._recent_paths:
             key = 'recent_path_%02d' % idx
             paths[key] = recent_path
             idx += 1
@@ -177,15 +244,108 @@ class Flatter:
         config = configparser.ConfigParser()
         config.read_dict(cfg)
 
-        cfg_file_name = os.path.join(self.home_dir, '.flatter')
+        cfg_file_name = os.path.join(self._home_dir, '.flatter')
         with open(cfg_file_name, 'w') as configfile:
             config.write(configfile)
+
+    def insert_new_sub(self, root_sub, new_sub):
+        for sub in root_sub.subs:
+            if new_sub.path.startswith(sub.path + '/'):
+                self.insert_new_sub(sub, new_sub)
+                return
+        root_sub.add_sub(new_sub)
+
+    def build_submodule_tree(self):
+        result = get_submodule_status(cached=True)
+        if not result:
+            return result
+        indexed_subs = result.get_val()
+
+        result = get_submodule_status(cached=False)
+        if not result:
+            return result
+        checked_out_subs = result.get_val()
+
+        if len(indexed_subs) != len(checked_out_subs):
+            return Result.error(
+                'indexed and checked out submodule lists were not the ' \
+                'same length')
+
+        root_sub = self.create_root_sub()
+
+        i = 0
+        while i < len(indexed_subs):
+            indexed_sub = indexed_subs[i]
+            checked_out_sub = checked_out_subs[i]
+            if not indexed_sub:
+                return Result.error('indexed submodule line was empty')
+            if not checked_out_sub:
+                return Result.error('checked out submodule line was empty')
+            if indexed_sub[0] != checked_out_sub[0]:
+                return Result.error(
+                    'submodule lines aren\' compatible; ' \
+                    'first characters must match.\n' \
+                    '    indexed: %s\n' \
+                    'checked out: %s\n' % \
+                    (indexed_sub, checked_out_sub))
+
+            initialized = indexed_sub[0] != '-'
+            merge_conflicts = indexed_sub[0] != 'U'
+
+            indexed_sub = indexed_sub[1:].split(' ')
+            checked_out_sub = checked_out_sub[1:].split(' ')
+
+            if len(indexed_sub) < 2:
+                return Result.error('indexed submodule line too short')
+            if len(checked_out_sub) < 2:
+                return Result.error('checked out submodule line too short')
+
+            indexed_hash = indexed_sub[0]
+            checked_out_hash = checked_out_sub[0]
+
+            if indexed_sub[1] != checked_out_sub[1]:
+                return Result.error(
+                    'sub paths didn\'t match:\n' \
+                    '  "%s" != "%s"' % (indexed_sub[1], checked_out_sub[1]))
+
+            sub_path = indexed_sub[1]
+            sub_name = os.path.basename(sub_path)
+
+            indexed_descr = ''
+            if len(indexed_sub) >= 3:
+                indexed_descr = indexed_sub[2]
+                indexed_descr = re.sub(r'^\(', '', indexed_descr)
+                indexed_descr = re.sub(r'\)$', '', indexed_descr)
+
+            checked_out_descr = ''
+            if len(checked_out_sub) >= 3:
+                checked_out_descr = checked_out_sub[2]
+                checked_out_descr = re.sub(r'^\(', '', checked_out_descr)
+                checked_out_descr = re.sub(r'\)$', '', checked_out_descr)
+
+            new_sub = Submodule(
+                name=sub_name,
+                path=sub_path,
+                indexed_hash=indexed_hash,
+                checked_out_hash=checked_out_hash,
+                indexed_descr=indexed_descr,
+                checked_out_descr=checked_out_descr,
+                initialized=initialized,
+                merge_conflicts=merge_conflicts)
+            self.insert_new_sub(root_sub, new_sub)
+
+            i += 1
+
+        _root_sub = root_sub;
+
+        return Result()
 
     def do_open_dir(self, path):
         if not path or not type(path) is str:
             return Result.error('bad path: "%s"' % str(path))
 
-        (ret, out, err) = exec_proc('git status')
+        git_status_cmd = 'git status'
+        (ret, out, err) = exec_proc(git_status_cmd)
         if ret != 0:
             return Result.error(err)
 
@@ -201,21 +361,28 @@ class Flatter:
             commit = lines[0][len(detatched_marker):]
         elif lines[0].startswith(branch_marker):
             branch = lines[0][len(branch_marker):]
-            commit = get_git_hash('HEAD')
+            commit_result = get_git_hash('HEAD')
+            if not commit_result:
+                return commit_result
+            commit = commit_result.get_val()
         else:
             err_txt = (
                 'bad git output:\n' +
                 '  out: %s\n' +
                 '  err: %s\n') % out, err
-            return Result.error(err_txt)
+            return make_git_err_msg(git_status_cmd, out, err)
 
         print('successfully opened path:', path)
         print('  branch:', branch)
         print('  commit:', commit)
 
-        self.set_last_path(path)
-        self.write_config()
-        return Result()
+        result = self.build_submodule_tree()
+        if result:
+            self._is_open = True
+            self.set_last_path(path)
+            self.write_config()
+
+        return result
 
     def open_dir(self, path):
         with DoInExistingDir(path) as ctx:
@@ -334,18 +501,18 @@ class FlatterWin:
         if not result:
             title = 'Couldn\'t open repo'
             if from_recent:
-                err_txt = (result.err + '\n\n' +
+                err_txt = (result.get_err() + '\n\n' +
                     'Remove from recent repos?')
                 remove_recent = tk.messagebox.askquestion(
-                    title, result.err,
+                    title, result.get_err(),
                     icon=tk.messagebox.ERROR)
                 if remove_recent == tk.messagebox.YES:
                     self.flatter.remove_recent(path)
             else:
-                tk.messagebox.showerror(title, result.err)
+                tk.messagebox.showerror(title, result.get_err())
 
         self.update_open_recent_menu()
-        state = 'normal' if result else 'disabled'
+        state = 'normal' if self.flatter.get_is_open() else 'disabled'
         self.file_menu.entryconfig('Refresh', state=state)
 
 
