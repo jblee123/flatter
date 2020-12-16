@@ -97,6 +97,16 @@ def exec_proc(cmd, capture_output=True):
         return subprocess.call(cmd, shell=shell)
 
 
+def is_descendant_of(w, other):
+    if not w:
+        return False
+
+    if w == other:
+        return True
+
+    return is_descendant_of(w.master, other)
+
+
 def get_lines(text):
     lines = text.split('\n') if text else []
     # lines = [line.strip() for line in lines]
@@ -492,16 +502,16 @@ class GraphFrame(tk.Frame):
 
         canvas.pack(side=tk.LEFT, expand=tk.YES, fill=tk.BOTH)
 
-        def on_mousewheel(event):
-            delta = 1 if event.delta > 0 else -1
-            canvas.yview_scroll(-delta, "units")
-
-        canvas.bind_all("<MouseWheel>", on_mousewheel)
-        canvas.bind_all("<Button-4>", on_mousewheel)
-        canvas.bind_all("<Button-5>", on_mousewheel)
-
         self.canvas = canvas
         self.main_frm = main_frm
+
+    def on_mousewheel(self, event):
+        if not is_descendant_of(event.widget, self):
+            return False
+
+        delta = 1 if event.delta > 0 else -1
+        self.canvas.yview_scroll(-delta, 'units')
+        return True
 
     def update_ui(self, flatter):
         for submod_frame in self.submod_frames:
@@ -542,12 +552,12 @@ class FlatterWin:
 
         console_frame = tk.Frame(pane1)
 
-        console_scrollbar = tk.Scrollbar(console_frame)
+        self.console_scrollbar = tk.Scrollbar(console_frame)
         self.console = tk.Text(console_frame, bg='light grey')
-        console_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.console_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.console.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        console_scrollbar.config(command=self.console.yview)
-        self.console.config(yscrollcommand=console_scrollbar.set)
+        self.console_scrollbar.config(command=self.console.yview)
+        self.console.config(yscrollcommand=self.console_scrollbar.set)
 
         pane1.update()
         pane_height = pane1.winfo_height()
@@ -555,7 +565,24 @@ class FlatterWin:
         pane1.add(self.graph_frame, height=top_height)
         pane1.add(console_frame, height=100)
 
+        def on_mousewheel(event):
+            possible_handlers = [self.graph_frame]
+            for w in possible_handlers:
+                if w.on_mousewheel(event):
+                    return
+
+        root.bind_all("<MouseWheel>", on_mousewheel)
+        root.bind_all("<Button-4>", on_mousewheel)
+        root.bind_all("<Button-5>", on_mousewheel)
+
         root.after(50, lambda: self.open_dir('D:/code/flatter/test_repos/blee/app1')) # jbltemp
+
+        def do_console_test(n): # jbltemp
+            self.add_to_console('line %d' % n)
+            if n < 100:
+                root.after(10, lambda: do_console_test(n + 1))
+
+        root.after(100, lambda: do_console_test(0)) # jbltemp
 
         root.mainloop()
 
@@ -635,6 +662,19 @@ class FlatterWin:
 
         if result:
             self.graph_frame.update_ui(self.flatter)
+
+    def clear_console(self):
+        self.console['state'] = tk.NORMAL
+        self.console.delete(1.0, tk.END)
+        self.console['state'] = tk.DISABLED
+
+    def add_to_console(self, text):
+        self.console['state'] = tk.NORMAL
+        do_scroll = self.console_scrollbar.get()[1] == 1
+        self.console.insert(tk.END, '> %s\n' % text)
+        if do_scroll:
+            self.console.see(tk.END)
+        self.console['state'] = tk.DISABLED
 
 if __name__ == '__main__':
     FlatterWin()
