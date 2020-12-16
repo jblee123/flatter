@@ -456,14 +456,14 @@ class SubmodFrame(tk.Frame):
         self.pack(anchor='nw', pady=(20, 0))
 
 
-class FlatterFrame(tk.Frame):
+class GraphFrame(tk.Frame):
     def __init__(self, parent=None):
         tk.Frame.__init__(self, parent)
 
         self.flatter = None
         self.submod_frames = []
 
-        self.pack(expand=tk.YES, fill=tk.BOTH)
+        # self.pack(expand=tk.YES, fill=tk.BOTH)
 
         self.init_canvas()
 
@@ -533,9 +533,29 @@ class FlatterWin:
 
         self.init_menu()
 
-        self.frame = FlatterFrame(root)
+        pane1 = tk.PanedWindow(
+            orient=tk.VERTICAL, sashwidth=10, sashrelief=tk.SUNKEN,
+            showhandle=True)
+        pane1.pack(fill=tk.BOTH, expand=True)
 
-        self.open_dir('D:/code/flatter/test_repos/blee/app1') # jbltemp
+        self.graph_frame = GraphFrame(pane1)
+
+        console_frame = tk.Frame(pane1)
+
+        console_scrollbar = tk.Scrollbar(console_frame)
+        self.console = tk.Text(console_frame, bg='light grey')
+        console_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.console.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        console_scrollbar.config(command=self.console.yview)
+        self.console.config(yscrollcommand=console_scrollbar.set)
+
+        pane1.update()
+        pane_height = pane1.winfo_height()
+        top_height = max(pane_height - 100, 100)
+        pane1.add(self.graph_frame, height=top_height)
+        pane1.add(console_frame, height=100)
+
+        root.after(50, lambda: self.open_dir('D:/code/flatter/test_repos/blee/app1')) # jbltemp
 
         root.mainloop()
 
@@ -614,7 +634,7 @@ class FlatterWin:
         self.file_menu.entryconfig('Refresh', state=state)
 
         if result:
-            self.frame.update_ui(self.flatter)
+            self.graph_frame.update_ui(self.flatter)
 
 if __name__ == '__main__':
     FlatterWin()
