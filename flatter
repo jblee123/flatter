@@ -405,34 +405,23 @@ class Flatter:
 
 
 class SubmodFrame(tk.Frame):
-    # self.name = name
-    # self.path = path
-    # self.indexed_hash = indexed_hash
-    # self.checked_out_hash = checked_out_hash
-    # self.indexed_descr = indexed_descr
-    # self.checked_out_descr = checked_out_descr
-    # self.initialized = initialized
-    # self.merge_conflicts = merge_conflicts
-    # self.subs = []
-
     def __init__(self, submodule, *args, **kwargs):
         super(SubmodFrame, self).__init__(*args, **kwargs)
-        # print('submodule:', str(submodule))
-        # print('args:', str(args))
-        # print('kwargs:', str(kwargs))
         self.submodule = submodule
 
-        self.config(bg='light grey')
-        self.config(highlightbackground='black')
-        self.config(highlightthickness=1)
+        parent = args[0]
+        self['bg'] = parent['bg']
 
-        color='red'
+        data_frame = tk.Frame(self,
+            bg='light grey',
+            highlightbackground='black',
+            highlightthickness=1)
 
         def make_label(text):
             var = tk.StringVar()
             var.set(text)
-            label = tk.Label(self, textvariable=var)
-            label['bg'] = self['bg']
+            label = tk.Label(data_frame, textvariable=var)
+            label['bg'] = data_frame['bg']
             label.pack(anchor=tk.W)
 
         make_label('Submodule: ' + submodule.name)
@@ -452,6 +441,19 @@ class SubmodFrame(tk.Frame):
             checked_out_str += '[uninitialized]'
         make_label(checked_out_str)
 
+        data_frame.pack(anchor='nw')
+
+        #self['bg']
+        left_spacer_frame = tk.Frame(self, bg=self['bg'], width=25)
+        left_spacer_frame.pack(side=tk.LEFT)
+
+        subs_frame = tk.Frame(self, bg=self['bg'])
+        subs_frame.pack(anchor='nw')
+
+        for child in submodule.subs:
+            frm = SubmodFrame(child, subs_frame)
+
+        self.pack(anchor='nw', pady=(20, 0))
 
 
 class FlatterFrame(tk.Frame):
@@ -461,14 +463,22 @@ class FlatterFrame(tk.Frame):
         self.flatter = None
         self.submod_frames = []
 
-        self.pack(expand=tk.YES, fill=tk.BOTH)            # make me expandable
+        self.pack(expand=tk.YES, fill=tk.BOTH)
 
         self.init_canvas()
 
     def init_canvas(self):
         canvas = tk.Canvas(self, bg='dark grey')
-        # canvas.config(scrollregion=(0, 0, 500, 500))      # canvas size corners
-        canvas.config(highlightthickness=0)               # no pixels to border
+        canvas.config(highlightthickness=0)
+
+        main_frm = tk.Frame(canvas, bg=canvas['bg'], padx=20)
+        main_frm.bind(
+            "<Configure>",
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")
+            )
+        )
+        canvas.create_window((0, 0), window=main_frm, anchor="nw")
 
         vertical = tk.Scrollbar(self)
         vertical.config(command=canvas.yview)             # xlink sbar and canv
@@ -480,25 +490,18 @@ class FlatterFrame(tk.Frame):
         canvas.config(xscrollcommand=horizontal.set)      # move one moves other
         horizontal.pack(side=tk.BOTTOM, fill=tk.X)        # pack first=clip last
 
-        canvas.pack(side=tk.LEFT, expand=tk.YES, fill=tk.BOTH) # canv clipped first
+        canvas.pack(side=tk.LEFT, expand=tk.YES, fill=tk.BOTH)
+
+        def on_mousewheel(event):
+            delta = 1 if event.delta > 0 else -1
+            canvas.yview_scroll(-delta, "units")
+
+        canvas.bind_all("<MouseWheel>", on_mousewheel)
+        canvas.bind_all("<Button-4>", on_mousewheel)
+        canvas.bind_all("<Button-5>", on_mousewheel)
 
         self.canvas = canvas
-
-    def draw_sub(self, sub, depth, row):
-        if depth > -1:
-            frm = SubmodFrame(sub, self.canvas)
-            x = depth * 100 + 50
-            y = row * 100 + 50
-            self.canvas.create_window((x, y), window=frm, anchor = tk.NW)
-
-            self.submod_frames.append(frm)
-
-        row += 1
-        depth += 1
-
-        for child in sub.subs:
-            row = self.draw_sub(child, depth, row)
-        return row
+        self.main_frm = main_frm
 
     def update_ui(self, flatter):
         for submod_frame in self.submod_frames:
@@ -507,11 +510,10 @@ class FlatterFrame(tk.Frame):
 
         self.flatter = flatter
         root_sub = flatter.get_root_sub()
-        self.draw_sub(root_sub, -1, -1)
 
-        scroll_width = flatter.get_sub_depth() * 100 + (50 * 2)
-        scroll_height = len(self.submod_frames) * 100 + 50
-        self.canvas.config(scrollregion=(0, 0, scroll_width, scroll_height))
+        for sub in root_sub.subs:
+            frm = SubmodFrame(sub, self.main_frm)
+            self.submod_frames.append(frm)
 
 
 class FlatterWin:
