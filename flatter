@@ -77,11 +77,15 @@ class DoInExistingDir(object):
         os.chdir(self._old_dir)
         return isinstance(value, OSError)
 
-def exec_proc(cmd, capture_output=True):
+def exec_proc(cmd, capture_output=True, console=None):
     sys.stdout.flush()
     sys.stderr.flush()
 
     shell = type(cmd) == str
+
+    if console:
+        cmd_txt = cmd if shell else ' '.join(cmd)
+        console.write('exec cmd: ' + cmd)
 
     if capture_output:
         p = subprocess.Popen(
@@ -145,11 +149,11 @@ def get_git_hash(ref):
         return make_git_err_msg(cmd, out, err)
 
 
-def get_submodule_status(cached):
+def get_submodule_status(cached, console=None):
     cmd = 'git submodule status --recursive'
     if cached:
         cmd += ' --cached'
-    (ret, out, err) = exec_proc(cmd)
+    (ret, out, err) = exec_proc(cmd, console=console)
     if ret == 0:
         return Result(get_lines(out.strip()))
     else:
@@ -178,13 +182,20 @@ class Submodule:
 
 
 class Flatter:
-    def __init__(self):
+    def __init__(self, console):
         self._is_open = False
         self._home_dir = get_home_dir()
         self._last_path = self._home_dir
         self._recent_paths = []
         self._root_sub = self.create_root_sub()
+        self._console = console
         self.read_config()
+
+    def write_console(self, text):
+        if self._console:
+            self._console.write(text)
+        else:
+            print(text)
 
     def get_is_open(self):
         return self._is_open
@@ -274,16 +285,16 @@ class Flatter:
             if new_sub.path.startswith(sub.path + '/'):
                 self.insert_new_sub(sub, new_sub)
                 return
-        print('adding sub:', new_sub.name)
+        self.write_console('adding sub: %s' % new_sub.name)
         root_sub.add_sub(new_sub)
 
     def build_submodule_tree(self):
-        result = get_submodule_status(cached=True)
+        result = get_submodule_status(cached=True, console=self._console)
         if not result:
             return result
         indexed_subs = result.get_val()
 
-        result = get_submodule_status(cached=False)
+        result = get_submodule_status(cached=False, console=self._console)
         if not result:
             return result
         checked_out_subs = result.get_val()
@@ -394,9 +405,11 @@ class Flatter:
                 '  err: %s\n') % out, err
             return make_git_err_msg(git_status_cmd, out, err)
 
-        print('successfully opened path:', path)
-        print('  branch:', branch)
-        print('  commit:', commit)
+        self.write_console(
+            'successfully opened path: %s\n'
+            '  branch: %s\n'
+            '  commit: %s\n' %
+            (path, branch, commit))
 
         result = self.build_submodule_tree()
         if result:
@@ -453,7 +466,6 @@ class SubmodFrame(tk.Frame):
 
         data_frame.pack(anchor='nw')
 
-        #self['bg']
         left_spacer_frame = tk.Frame(self, bg=self['bg'], width=25)
         left_spacer_frame.pack(side=tk.LEFT)
 
@@ -472,8 +484,6 @@ class GraphFrame(tk.Frame):
 
         self.flatter = None
         self.submod_frames = []
-
-        # self.pack(expand=tk.YES, fill=tk.BOTH)
 
         self.init_canvas()
 
@@ -526,12 +536,20 @@ class GraphFrame(tk.Frame):
             self.submod_frames.append(frm)
 
 
+class FlatterWinConsole:
+    def __init__(self, win):
+        self.win = win
+
+    def write(self, text):
+        self.win.add_to_console(text)
+
+
 class FlatterWin:
     def __init__(self, root=None):
         if root is None:
             root = tk.Tk()
         self.root = root
-        self.flatter = Flatter()
+        self.flatter = Flatter(FlatterWinConsole(self))
 
         root.wm_title('Flatter!')
 
@@ -576,13 +594,6 @@ class FlatterWin:
         root.bind_all("<Button-5>", on_mousewheel)
 
         root.after(50, lambda: self.open_dir('D:/code/flatter/test_repos/blee/app1')) # jbltemp
-
-        def do_console_test(n): # jbltemp
-            self.add_to_console('line %d' % n)
-            if n < 100:
-                root.after(10, lambda: do_console_test(n + 1))
-
-        root.after(100, lambda: do_console_test(0)) # jbltemp
 
         root.mainloop()
 
@@ -644,17 +655,24 @@ class FlatterWin:
 
         result = self.flatter.open_dir(path)
         if not result:
-            title = 'Couldn\'t open repo'
+            self.add_to_console(
+                '====== ERROR ======\n' +
+                result.get_err() + '\n' +
+                '  ==== END ERROR ====')
+
+            title = 'Error'
+            err_txt = \
+                'Couldn\'t open repo.\n' \
+                '(See console for additional information.)'
             if from_recent:
-                err_txt = (result.get_err() + '\n\n' +
-                    'Remove from recent repos?')
+                err_txt += '\n\nRemove from recent repos?'
                 remove_recent = tk.messagebox.askquestion(
-                    title, result.get_err(),
+                    title, err_txt,
                     icon=tk.messagebox.ERROR)
                 if remove_recent == tk.messagebox.YES:
                     self.flatter.remove_recent(path)
             else:
-                tk.messagebox.showerror(title, result.get_err())
+                tk.messagebox.showerror(title, err_txt)
 
         self.update_open_recent_menu()
         state = 'normal' if self.flatter.get_is_open() else 'disabled'
