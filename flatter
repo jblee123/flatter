@@ -85,7 +85,7 @@ def exec_proc(cmd, capture_output=True, console=None):
 
     if console:
         cmd_txt = cmd if shell else ' '.join(cmd)
-        console.write('exec cmd: ' + cmd)
+        console.write('exec cmd: ' + cmd_txt)
 
     if capture_output:
         p = subprocess.Popen(
@@ -140,6 +140,7 @@ def make_git_err_msg(cmd, out, err):
         '  err: ' + err
     return Result.error(err_str)
 
+
 def get_git_hash(ref):
     cmd = ['git', 'rev-parse', ref]
     (ret, out, err) = exec_proc(cmd)
@@ -156,6 +157,24 @@ def get_submodule_status(cached, console=None):
     (ret, out, err) = exec_proc(cmd, console=console)
     if ret == 0:
         return Result(get_lines(out.strip()))
+    else:
+        return make_git_err_msg(cmd, out, err)
+
+
+def get_git_remotes(console=None):
+    cmd = 'git remote'
+    (ret, out, err) = exec_proc(cmd, console=console)
+    if ret == 0:
+        return Result(get_lines(out.strip()))
+    else:
+        return make_git_err_msg(cmd, out, err)
+
+
+def fetch_git_remote(remote, console=None):
+    cmd = ['git', 'fetch', remote]
+    (ret, out, err) = exec_proc(cmd, console=console)
+    if ret == 0:
+        return Result()
     else:
         return make_git_err_msg(cmd, out, err)
 
@@ -426,6 +445,52 @@ class Flatter:
             else:
                 return Result.error('missing repo: %s' % path)
 
+    def fetch_submodule(self):
+        result = get_git_remotes(console=self._console)
+        if not result:
+            self._console.write(
+                'Error getting remotes for submodule:\n'
+                '  %s' % result.get_err())
+            return result
+
+        remotes = result.get_val()
+        if remotes:
+            self._console.write('Found remote(s): ' + ', '.join(remotes))
+        else:
+            self._console.write('Found no remotes.')
+
+        had_err = False
+        for remote in remotes:
+            result = fetch_git_remote(remote, console=self._console)
+            if not result:
+                had_err = True
+                self._console.write(
+                    'Error fetching submodule:\n'
+                    '  %s' % result.get_err())
+
+        return Result() if not had_err else Result('Error fetching submodule')
+
+    def fetch_immediate_submodules(self):
+        if not self._is_open:
+            return
+
+        had_err = False
+        for sub in self._root_sub.subs:
+            path = os.path.join(self._last_path, sub.path)
+            self._console.write('Entering directory: ' + path)
+            with DoInExistingDir(path) as ctx:
+                if ctx:
+                    if not self.fetch_submodule():
+                        had_err = True
+                else:
+                    had_err = True
+                    self._console.write(
+                        'Could not switch to directory %s '
+                        'for submodule %s\n' % (sub.path, sub.name))
+
+        return (Result() if not had_err else
+            Result.error('Errors encountered fetching submodules.'))
+
 
 class SubmodFrame(tk.Frame):
     def __init__(self, submodule, *args, **kwargs):
@@ -548,6 +613,8 @@ class FlatterWin:
     def __init__(self, root=None):
         if root is None:
             root = tk.Tk()
+            root['bg'] = 'light grey'
+        bg_color = root['bg']
         self.root = root
         self.flatter = Flatter(FlatterWinConsole(self))
 
@@ -561,6 +628,14 @@ class FlatterWin:
 
         self.init_menu()
 
+        button_frame = tk.Frame(root, bg=bg_color)
+        button_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+
+        fetch_top_subs_btn = tk.Button(button_frame,
+            text='Fetch Immediate\nSubmodules',
+            command=self.fetch_immediate_submodules)
+        fetch_top_subs_btn.pack(side=tk.TOP)
+
         pane1 = tk.PanedWindow(
             orient=tk.VERTICAL, sashwidth=10, sashrelief=tk.SUNKEN,
             showhandle=True)
@@ -571,7 +646,7 @@ class FlatterWin:
         console_frame = tk.Frame(pane1)
 
         self.console_scrollbar = tk.Scrollbar(console_frame)
-        self.console = tk.Text(console_frame, bg='light grey')
+        self.console = tk.Text(console_frame, bg=bg_color)
         self.console_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.console.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.console_scrollbar.config(command=self.console.yview)
@@ -693,6 +768,9 @@ class FlatterWin:
         if do_scroll:
             self.console.see(tk.END)
         self.console['state'] = tk.DISABLED
+
+    def fetch_immediate_submodules(self):
+        self.flatter.fetch_immediate_submodules()
 
 if __name__ == '__main__':
     FlatterWin()
