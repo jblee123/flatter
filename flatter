@@ -38,6 +38,7 @@ import subprocess
 import sys
 
 import tkinter.filedialog
+import tkinter.font
 import tkinter.messagebox
 
 
@@ -614,19 +615,33 @@ class SubmodFrame(tk.Frame):
         super(SubmodFrame, self).__init__(*args, **kwargs)
         self.submodule = submodule
 
+        if not hasattr(SubmodFrame, 'label_font'):
+            default_font = tk.font.nametofont('TkDefaultFont')
+            SubmodFrame.label_font = tk.font.Font(
+                name='submod_frame_label', family=default_font['family'],
+                size=8, weight='normal', slant='roman',
+                underline=0, overstrike=0)
+
         parent = args[0]
         self['bg'] = parent['bg']
 
         data_frame = tk.Frame(self,
-            bg='light grey',
             highlightbackground='black',
             highlightthickness=1)
+
+        if submodule.derived:
+            data_frame['bg'] = 'burlywood1'
+        elif not submodule.initialized:
+            data_frame['bg'] = 'blanched almond'
+        else:
+            data_frame['bg'] = 'light grey'
 
         def make_label(text):
             var = tk.StringVar()
             var.set(text)
-            label = tk.Label(data_frame, textvariable=var)
+            label = tk.Label(data_frame, textvariable=var, pady=0)
             label['bg'] = data_frame['bg']
+            label['font'] = 'submod_frame_label'
             label.pack(anchor=tk.W)
 
         make_label('Submodule: ' + submodule.name)
@@ -661,6 +676,13 @@ class SubmodFrame(tk.Frame):
             frm = SubmodFrame(child, subs_frame)
 
         self.pack(anchor='nw', pady=(20, 0))
+
+# def init_submod_frame_label_font():
+#     default_font = tk.font.nametofont('TkDefaultFont')
+#     SubmodFrame.label_font = tk.font.Font(
+#         family=default_font['family'], size=8, weight='normal', slant='roman',
+#         underline=0, overstrike=0)
+# init_submod_frame_label_font()
 
 
 class GraphFrame(tk.Frame):
