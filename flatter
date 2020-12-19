@@ -179,12 +179,57 @@ def fetch_git_remote(remote, console=None):
         return make_git_err_msg(cmd, out, err)
 
 
+def get_subs_from_gitmodules(treeish, console=None):
+    sub_info = {}
+
+    cmd = ['git', 'ls-tree', treeish, '.gitmodules']
+    (ret, out, err) = exec_proc(cmd, console=console)
+    if ret == 0:
+        if not out.strip():
+            return Result(sub_info)
+    else:
+        return make_git_err_msg(cmd, out, err)
+
+    cmd = 'git config -l --blob %s:.gitmodules' % treeish
+    (ret, out, err) = exec_proc(cmd, console=console)
+    if ret == 0:
+        for line in get_lines(out.strip()):
+            parts = line.split('=', 1)
+            if len(parts) < 2:
+                continue
+            (var, val) = line.split('=', 1)
+            parts = var.split('.', 2)
+            if (len(parts) != 3
+                or parts[0] != 'submodule'
+                or parts[2] != 'path'):
+
+                continue
+            name = os.path.basename(parts[1])
+            path = val
+            sub_info[name] = path
+        return Result(sub_info)
+    else:
+        return make_git_err_msg(cmd, out, err)
+
+
+def get_submodule_commit(treeish, sub_path, console=None):
+    cmd = ['git', 'ls-tree', treeish, sub_path]
+    (ret, out, err) = exec_proc(cmd, console=console)
+    if ret == 0:
+        parts = out.split()
+        if len(parts) < 4 or parts[1] != 'commit':
+            return Result.error('bad output for git ls-tree:\n  ' + out)
+        return Result(parts[2])
+    else:
+        return make_git_err_msg(cmd, out, err)
+
+
 class Submodule:
     def __init__(self,
         name, path,
         indexed_hash, checked_out_hash,
         indexed_descr, checked_out_descr,
-        initialized, merge_conflicts):
+        initialized, derived, merge_conflicts):
 
         self.name = name
         self.path = path
@@ -193,6 +238,7 @@ class Submodule:
         self.indexed_descr = indexed_descr
         self.checked_out_descr = checked_out_descr
         self.initialized = initialized
+        self.derived = derived
         self.merge_conflicts = merge_conflicts
         self.subs = []
 
@@ -207,6 +253,7 @@ class Flatter:
         self._last_path = self._home_dir
         self._recent_paths = []
         self._root_sub = self.create_root_sub()
+        self._top_subs = {}
         self._console = console
         self.read_config()
 
@@ -224,7 +271,8 @@ class Flatter:
             name='', path='',
             indexed_hash='', checked_out_hash='',
             indexed_descr='', checked_out_descr='',
-            initialized=False, merge_conflicts=False)
+            initialized=False, derived=False,
+            merge_conflicts=False)
 
     def get_last_path(self):
         return self._last_path
@@ -383,12 +431,14 @@ class Flatter:
                 indexed_descr=indexed_descr,
                 checked_out_descr=checked_out_descr,
                 initialized=initialized,
+                derived=False,
                 merge_conflicts=merge_conflicts)
             self.insert_new_sub(root_sub, new_sub)
 
             i += 1
 
         self._root_sub = root_sub;
+        self._top_subs = dict([(sub.name, sub) for sub in self._root_sub.subs])
 
         return Result()
 
@@ -435,6 +485,7 @@ class Flatter:
             self._is_open = True
             self.set_last_path(path)
             self.write_config()
+            self.derive_uninitialized_repos()
 
         return result
 
@@ -491,6 +542,72 @@ class Flatter:
         return (Result() if not had_err else
             Result.error('Errors encountered fetching submodules.'))
 
+    def sub_exists_at_top_level(self, sub):
+        return sub.name in self._top_subs.keys()
+
+    def create_derived_repo_children(self, submodule):
+        sub_info = get_subs_from_gitmodules(
+            submodule.indexed_hash, console=self._console)
+        if not sub_info:
+            self._console.write(
+                'Couldn\'t get submodule info for submodule '
+                '%s\n:  err: %s' % (submodule.name, sub_info.get_err()))
+            return
+
+        for (sub_sub_name, sub_sub_path) in sub_info.get_val().items():
+            sub_hash = get_submodule_commit(
+                submodule.indexed_hash, sub_sub_path, console=self._console)
+            if not sub_hash:
+                self._console.write(
+                    'Could not switch to directory %s for submodule %s\n'
+                    % (path, submodule.name))
+                continue
+
+            new_sub = Submodule(
+                name=sub_sub_name,
+                path=os.path.join(submodule.path, sub_sub_path),
+                indexed_hash=sub_hash.get_val(),
+                checked_out_hash='',
+                indexed_descr='',
+                checked_out_descr='',
+                initialized=False,
+                derived=True,
+                merge_conflicts=False)
+            self.insert_new_sub(submodule, new_sub)
+
+    def do_derive_repo_children(self, submodule):
+        # Get rid of any derived subs before re-deriving.
+        submodule.subs = []
+
+        if not self.sub_exists_at_top_level(submodule):
+            return
+
+        # jump into top-level sub and:
+        top_sub = self._top_subs[submodule.name]
+        path = os.path.join(self._last_path, top_sub.path)
+        self._console.write('Entering directory: ' + path)
+        with DoInExistingDir(path) as ctx:
+            if ctx:
+                self.create_derived_repo_children(submodule)
+            else:
+                self._console.write(
+                    'Could not switch to directory %s '
+                    'for submodule %s\n' % (path, submodule.name))
+                return
+
+    def do_derive_uninitialized_repos(self, submodule):
+        if not submodule.initialized:
+            self.do_derive_repo_children(submodule)
+
+        self.do_derive_uninitialized_child_repos(submodule)
+
+    def do_derive_uninitialized_child_repos(self, submodule):
+        for sub in submodule.subs:
+            self.do_derive_uninitialized_repos(sub)
+
+    def derive_uninitialized_repos(self):
+        self.do_derive_uninitialized_child_repos(self._root_sub)
+
 
 class SubmodFrame(tk.Frame):
     def __init__(self, submodule, *args, **kwargs):
@@ -526,7 +643,10 @@ class SubmodFrame(tk.Frame):
             if submodule.checked_out_descr:
                 checked_out_str += ' (%s)' % submodule.checked_out_descr
         else:
-            checked_out_str += '[uninitialized]'
+            descr = 'uninitialized'
+            if submodule.derived:
+                descr += "/derived"
+            checked_out_str += '[' + descr + ']'
         make_label(checked_out_str)
 
         data_frame.pack(anchor='nw')
