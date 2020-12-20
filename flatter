@@ -230,7 +230,8 @@ class Submodule:
         name, path,
         indexed_hash, checked_out_hash,
         indexed_descr, checked_out_descr,
-        initialized, derived, merge_conflicts):
+        initialized, derived, missing_at_top,
+        merge_conflicts):
 
         self.name = name
         self.path = path
@@ -240,6 +241,7 @@ class Submodule:
         self.checked_out_descr = checked_out_descr
         self.initialized = initialized
         self.derived = derived
+        self.missing_at_top = missing_at_top
         self.merge_conflicts = merge_conflicts
         self.subs = []
 
@@ -272,7 +274,7 @@ class Flatter:
             name='', path='',
             indexed_hash='', checked_out_hash='',
             indexed_descr='', checked_out_descr='',
-            initialized=False, derived=False,
+            initialized=False, derived=False, missing_at_top=True,
             merge_conflicts=False)
 
     def get_last_path(self):
@@ -373,6 +375,7 @@ class Flatter:
                 'same length')
 
         root_sub = self.create_root_sub()
+        added_subs = []
 
         i = 0
         while i < len(indexed_subs):
@@ -433,13 +436,20 @@ class Flatter:
                 checked_out_descr=checked_out_descr,
                 initialized=initialized,
                 derived=False,
+                missing_at_top=False,
                 merge_conflicts=merge_conflicts)
             self.insert_new_sub(root_sub, new_sub)
+            added_subs.append(new_sub)
 
             i += 1
 
         self._root_sub = root_sub;
         self._top_subs = dict([(sub.name, sub) for sub in self._root_sub.subs])
+
+        # can only call sub_exists_at_top_level() after self._top_subs is set.
+        for added_subs in added_subs:
+            added_subs.missing_at_top = \
+                not self.sub_exists_at_top_level(added_subs)
 
         return Result()
 
@@ -573,8 +583,11 @@ class Flatter:
                 checked_out_descr='',
                 initialized=False,
                 derived=True,
+                missing_at_top=False,
                 merge_conflicts=False)
             self.insert_new_sub(submodule, new_sub)
+
+            new_sub.missing_at_top = not self.sub_exists_at_top_level(new_sub)
 
     def do_derive_repo_children(self, submodule):
         # Get rid of any derived subs before re-deriving.
@@ -625,16 +638,28 @@ class SubmodFrame(tk.Frame):
         parent = args[0]
         self['bg'] = parent['bg']
 
-        data_frame = tk.Frame(self,
-            highlightbackground='black',
-            highlightthickness=1)
+        # border_canvas_bg = 'black' if submodule.initialized else 'dim gray'
 
-        if submodule.derived:
-            data_frame['bg'] = 'burlywood1'
+        border_canvas = tk.Canvas(self,
+            highlightthickness=0,
+            bg=parent['bg'])
+        border_canvas.bind(
+            '<Configure>',
+            lambda e: self.on_border_canvas_cfg(e))
+        border_canvas.pack(anchor=tk.NW, ipadx=4, ipady=4)
+        self.border_canvas = border_canvas
+
+        data_frame = tk.Frame(border_canvas)#,
+            # highlightbackground='black',
+            # highlightthickness=1)
+
+        if submodule.missing_at_top:
+            data_frame['bg'] = 'pink'
         elif not submodule.initialized:
-            data_frame['bg'] = 'blanched almond'
+        # elif submodule.derived:
+            data_frame['bg'] = 'light gray'
         else:
-            data_frame['bg'] = 'light grey'
+            data_frame['bg'] = 'white'
 
         def make_label(text):
             var = tk.StringVar()
@@ -644,7 +669,7 @@ class SubmodFrame(tk.Frame):
             label['font'] = 'submod_frame_label'
             label.pack(anchor=tk.W)
 
-        make_label('Submodule: ' + submodule.name)
+        make_label('Name: ' + submodule.name)
         make_label('Path: ' + submodule.path)
 
         indexed_str = 'At index: ' + submodule.indexed_hash[:8]
@@ -664,7 +689,8 @@ class SubmodFrame(tk.Frame):
             checked_out_str += '[' + descr + ']'
         make_label(checked_out_str)
 
-        data_frame.pack(anchor='nw')
+        # data_frame.pack(anchor=tk.NW)
+        data_frame.pack(anchor=tk.CENTER, fill=tk.NONE, expand=True)
 
         left_spacer_frame = tk.Frame(self, bg=self['bg'], width=25)
         left_spacer_frame.pack(side=tk.LEFT)
@@ -675,14 +701,25 @@ class SubmodFrame(tk.Frame):
         for child in submodule.subs:
             frm = SubmodFrame(child, subs_frame)
 
-        self.pack(anchor='nw', pady=(20, 0))
+        self.pack(anchor=tk.NW, pady=(20, 0))
 
-# def init_submod_frame_label_font():
-#     default_font = tk.font.nametofont('TkDefaultFont')
-#     SubmodFrame.label_font = tk.font.Font(
-#         family=default_font['family'], size=8, weight='normal', slant='roman',
-#         underline=0, overstrike=0)
-# init_submod_frame_label_font()
+    def on_border_canvas_cfg(self, event):
+        left = 2
+        top = 2
+        right = event.widget.winfo_width() - 2
+        bottom = event.widget.winfo_height() - 2
+
+        if self.submodule.initialized:
+            dash = ''
+            outline = 'black'
+        else:
+            dash = (10, 2)
+            outline = 'dim grey'
+
+        self.border_canvas.delete('border_line')
+        self.border_canvas.create_rectangle(
+            left, top, right, bottom,
+            width=2, outline=outline, dash=dash, tag='border_line')
 
 
 class GraphFrame(tk.Frame):
@@ -696,16 +733,16 @@ class GraphFrame(tk.Frame):
 
     def init_canvas(self):
         canvas = tk.Canvas(self, bg='dark grey')
-        canvas.config(highlightthickness=0)
+        canvas['highlightthickness'] = 0
 
         main_frm = tk.Frame(canvas, bg=canvas['bg'], padx=20)
         main_frm.bind(
-            "<Configure>",
+            '<Configure>',
             lambda e: canvas.configure(
                 scrollregion=canvas.bbox("all")
             )
         )
-        canvas.create_window((0, 0), window=main_frm, anchor="nw")
+        canvas.create_window((0, 0), window=main_frm, anchor=tk.NW)
 
         vertical = tk.Scrollbar(self)
         vertical.config(command=canvas.yview)             # xlink sbar and canv
