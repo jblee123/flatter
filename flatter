@@ -31,6 +31,7 @@ except ModuleNotFoundError:
 
 import collections
 import configparser
+import math
 import os
 import pprint
 import re
@@ -628,17 +629,17 @@ class SubmodFrame(tk.Frame):
         super(SubmodFrame, self).__init__(*args, **kwargs)
         self.submodule = submodule
 
-        if not hasattr(SubmodFrame, 'label_font'):
+        if not hasattr(SubmodFrame, 'txt_font'):
             default_font = tk.font.nametofont('TkDefaultFont')
-            SubmodFrame.label_font = tk.font.Font(
-                name='submod_frame_label', family=default_font['family'],
-                size=8, weight='normal', slant='roman',
-                underline=0, overstrike=0)
+            SubmodFrame.txt_font = tk.font.Font(
+                family=default_font['family'], size=10)
+            SubmodFrame.txt_font_bold = SubmodFrame.txt_font.copy()
+            SubmodFrame.txt_font_bold['weight'] = 'bold'
+            SubmodFrame.txt_font_italic = SubmodFrame.txt_font.copy()
+            SubmodFrame.txt_font_italic['slant'] = 'italic'
 
         parent = args[0]
         self['bg'] = parent['bg']
-
-        # border_canvas_bg = 'black' if submodule.initialized else 'dim gray'
 
         border_canvas = tk.Canvas(self,
             highlightthickness=0,
@@ -649,45 +650,64 @@ class SubmodFrame(tk.Frame):
         border_canvas.pack(anchor=tk.NW, ipadx=4, ipady=4)
         self.border_canvas = border_canvas
 
-        data_frame = tk.Frame(border_canvas)#,
-            # highlightbackground='black',
-            # highlightthickness=1)
+        data_frame = tk.Frame(border_canvas)
 
         if submodule.missing_at_top:
             data_frame['bg'] = 'pink'
         elif not submodule.initialized:
-        # elif submodule.derived:
             data_frame['bg'] = 'light gray'
         else:
             data_frame['bg'] = 'white'
 
-        def make_label(text):
-            var = tk.StringVar()
-            var.set(text)
-            label = tk.Label(data_frame, textvariable=var, pady=0)
-            label['bg'] = data_frame['bg']
-            label['font'] = 'submod_frame_label'
-            label.pack(anchor=tk.W)
+        def make_text():
+            text = tk.Text(data_frame, height=1, font=SubmodFrame.txt_font)
+            text.tag_configure('bold', font=SubmodFrame.txt_font_bold)
+            text.tag_configure('italic', font=SubmodFrame.txt_font_italic)
+            text['bg'] = text.master['bg']
+            text['relief'] = tk.FLAT
+            return text
 
-        make_label('Name: ' + submodule.name)
-        make_label('Path: ' + submodule.path)
+        o_len_pix = SubmodFrame.txt_font.measure('0')
 
-        indexed_str = 'At index: ' + submodule.indexed_hash[:8]
+        def get_fit_text_width(txt_widget):
+            text = txt_widget.get(1.0, tk.END)
+            txt_len_pix = SubmodFrame.txt_font.measure(text)
+            txt_len_chars = math.ceil(txt_len_pix / o_len_pix)
+            return txt_len_chars
+
+        text = make_text()
+        text.insert('end', submodule.name, 'bold')
+        text.insert('end', ' (path: %s)' % submodule.path)
+        text['state'] = tk.DISABLED
+        text['width'] = get_fit_text_width(text)
+        text.pack(anchor=tk.W)
+
+        text = make_text()
+
+        indexed_str = submodule.indexed_hash[:8]
         if submodule.indexed_descr:
-            indexed_str += ' (%s)' % submodule.indexed_descr
-        make_label(indexed_str)
+            descr = submodule.indexed_descr
+            if descr.startswith('heads/'):
+                descr = descr[len('heads/'):]
+            indexed_str += ' (%s)' % descr
+        text.insert('end', 'Idx commit: %s' % indexed_str)
 
-        checked_out_str = 'Checked out: '
         if submodule.initialized:
-            checked_out_str += submodule.checked_out_hash[:8]
+            checked_out_str = submodule.checked_out_hash[:8]
             if submodule.checked_out_descr:
-                checked_out_str += ' (%s)' % submodule.checked_out_descr
+                descr = submodule.checked_out_descr
+                if descr.startswith('heads/'):
+                    descr = descr[len('heads/'):]
+                checked_out_str += ' (%s)' % descr
+            text.insert('end', ', Checked out: %s' % checked_out_str)
         else:
-            descr = 'uninitialized'
-            if submodule.derived:
-                descr += "/derived"
-            checked_out_str += '[' + descr + ']'
-        make_label(checked_out_str)
+            descr = 'derived' if submodule.derived else 'uninitialized'
+            text.insert('end', ', ')
+            text.insert('end', '%s' % descr, 'italic')
+
+        text['state'] = tk.DISABLED
+        text['width'] = get_fit_text_width(text)
+        text.pack(anchor=tk.W)
 
         # data_frame.pack(anchor=tk.NW)
         data_frame.pack(anchor=tk.CENTER, fill=tk.NONE, expand=True)
