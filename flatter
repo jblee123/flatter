@@ -31,6 +31,7 @@ except ModuleNotFoundError:
 
 import collections
 import configparser
+import enum
 import math
 import os
 import pprint
@@ -41,6 +42,14 @@ import sys
 import tkinter.filedialog
 import tkinter.font
 import tkinter.messagebox
+
+
+class CommitDirection(enum.Enum):
+    MATCHES = 1
+    AHEAD = 2
+    BEHIND = 3
+    ADJACENT = 4
+    NONE = 5
 
 
 class Result:
@@ -96,8 +105,8 @@ def exec_proc(cmd, capture_output=True, console=None):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE)
         out, err = p.communicate()
-        out = out.decode('utf-8').strip()
-        err = err.decode('utf-8').strip()
+        out = out.decode('utf-8')
+        err = err.decode('utf-8')
         return p.returncode, out, err
     else:
         return subprocess.call(cmd, shell=shell)
@@ -115,6 +124,8 @@ def is_descendant_of(w, other):
 
 def get_lines(text):
     lines = text.split('\n') if text else []
+    if lines and lines[-1] == '':
+        lines = lines[:-1]
     # lines = [line.strip() for line in lines]
     return lines
 
@@ -158,7 +169,7 @@ def get_submodule_status(cached, console=None):
         cmd += ' --cached'
     (ret, out, err) = exec_proc(cmd, console=console)
     if ret == 0:
-        return Result(get_lines(out.strip()))
+        return Result(get_lines(out))
     else:
         return make_git_err_msg(cmd, out, err)
 
@@ -226,12 +237,23 @@ def get_submodule_commit(treeish, sub_path, console=None):
         return make_git_err_msg(cmd, out, err)
 
 
+def get_commit_is_ancestor(commit1, commit2):
+    cmd = ['git', 'merge-base', '--is-ancestor', commit1, commit2]
+    (ret, out, err) = exec_proc(cmd)
+    if ret == 0:
+        return Result(True)
+    elif ret == 1:
+        return Result(False)
+    else:
+        return make_git_err_msg(cmd, out, err)
+
+
 class Submodule:
     def __init__(self,
         name, path,
         indexed_hash, checked_out_hash,
         indexed_descr, checked_out_descr,
-        initialized, derived, missing_at_top,
+        initialized, derived,
         merge_conflicts):
 
         self.name = name
@@ -242,8 +264,11 @@ class Submodule:
         self.checked_out_descr = checked_out_descr
         self.initialized = initialized
         self.derived = derived
-        self.missing_at_top = missing_at_top
         self.merge_conflicts = merge_conflicts
+        self.is_top_level = False
+        self.missing_at_top = False
+        self.relation_to_top_indexed = CommitDirection.NONE
+        self.relation_to_top_checked_out = CommitDirection.NONE
         self.subs = []
 
     def add_sub(self, sub):
@@ -275,7 +300,7 @@ class Flatter:
             name='', path='',
             indexed_hash='', checked_out_hash='',
             indexed_descr='', checked_out_descr='',
-            initialized=False, derived=False, missing_at_top=True,
+            initialized=False, derived=False,
             merge_conflicts=False)
 
     def get_last_path(self):
@@ -437,7 +462,6 @@ class Flatter:
                 checked_out_descr=checked_out_descr,
                 initialized=initialized,
                 derived=False,
-                missing_at_top=False,
                 merge_conflicts=merge_conflicts)
             self.insert_new_sub(root_sub, new_sub)
             added_subs.append(new_sub)
@@ -446,11 +470,6 @@ class Flatter:
 
         self._root_sub = root_sub;
         self._top_subs = dict([(sub.name, sub) for sub in self._root_sub.subs])
-
-        # can only call sub_exists_at_top_level() after self._top_subs is set.
-        for added_subs in added_subs:
-            added_subs.missing_at_top = \
-                not self.sub_exists_at_top_level(added_subs)
 
         return Result()
 
@@ -498,6 +517,7 @@ class Flatter:
             self.set_last_path(path)
             self.write_config()
             self.derive_uninitialized_repos()
+            self.calc_stats_recursive(self._root_sub)
 
         return result
 
@@ -584,11 +604,8 @@ class Flatter:
                 checked_out_descr='',
                 initialized=False,
                 derived=True,
-                missing_at_top=False,
                 merge_conflicts=False)
             self.insert_new_sub(submodule, new_sub)
-
-            new_sub.missing_at_top = not self.sub_exists_at_top_level(new_sub)
 
     def do_derive_repo_children(self, submodule):
         # Get rid of any derived subs before re-deriving.
@@ -622,6 +639,83 @@ class Flatter:
 
     def derive_uninitialized_repos(self):
         self.do_derive_uninitialized_child_repos(self._root_sub)
+
+    def do_calc_ahead_behind_adjacent(self, submodule_hash, top_sub_hash):
+        result = get_commit_is_ancestor(submodule_hash, top_sub_hash)
+        if result:
+            if result.get_val():
+                return Result(CommitDirection.BEHIND)
+        else:
+            return result
+
+        result = get_commit_is_ancestor(top_sub_hash, submodule_hash)
+        if result:
+            if result.get_val():
+                return Result(CommitDirection.AHEAD)
+        else:
+            return result
+
+        return Result(CommitDirection.ADJACENT)
+
+    def calc_ahead_behind_adjacent_in_dir(self, submodule, top_sub):
+        if submodule.relation_to_top_indexed == CommitDirection.NONE:
+            result = self.do_calc_ahead_behind_adjacent(
+                submodule.indexed_hash, top_sub.indexed_hash)
+            if result:
+                submodule.relation_to_top_indexed = result.get_val()
+            else:
+                self._console.write(
+                    'Error determining commit ancestry:\n'
+                    '  %s' % result.get_err())
+
+        if submodule.relation_to_top_checked_out == CommitDirection.NONE:
+            result = self.do_calc_ahead_behind_adjacent(
+                submodule.indexed_hash, top_sub.checked_out_hash)
+            if result:
+                submodule.relation_to_top_checked_out = result.get_val()
+            else:
+                self._console.write(
+                    'Error determining commit ancestry:\n'
+                    '  %s' % result.get_err())
+
+    def calc_ahead_behind_adjacent(self, submodule, top_sub):
+        path = os.path.join(self._last_path, top_sub.path)
+        with DoInExistingDir(path) as ctx:
+            if ctx:
+                self.calc_ahead_behind_adjacent_in_dir(submodule, top_sub)
+            else:
+                self._console.write(
+                    'Could not switch to directory %s '
+                    'for submodule %s\n' % (path, top_sub.name))
+                return
+
+    def calc_stats(self, submodule):
+        submodule.is_top_level = submodule in self._top_subs.values()
+        submodule.missing_at_top = not self.sub_exists_at_top_level(submodule)
+
+        submodule.relation_to_top_indexed = CommitDirection.NONE
+        submodule.relation_to_top_checked_out = CommitDirection.NONE
+
+        if (submodule == self._root_sub
+            or submodule.is_top_level
+            or submodule.missing_at_top):
+
+            return
+
+        top_sub = self._top_subs[submodule.name]
+
+        if submodule.indexed_hash == top_sub.indexed_hash:
+            submodule.relation_to_top_indexed = CommitDirection.MATCHES
+
+        if submodule.indexed_hash == top_sub.checked_out_hash:
+            submodule.relation_to_top_checked_out = CommitDirection.MATCHES
+
+        self.calc_ahead_behind_adjacent(submodule, top_sub)
+
+    def calc_stats_recursive(self, submodule):
+        self.calc_stats(submodule)
+        for sub in submodule.subs:
+            self.calc_stats_recursive(sub)
 
 
 class SubmodFrame(tk.Frame):
@@ -830,10 +924,15 @@ class FlatterWin:
         button_frame = tk.Frame(root, bg=bg_color)
         button_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
 
+        refresh_ui_btn = tk.Button(button_frame,
+            text='Refresh',
+            command=self.refresh_ui)
+        refresh_ui_btn.pack(side=tk.TOP, fill=tk.X)
+
         fetch_top_subs_btn = tk.Button(button_frame,
             text='Fetch Immediate\nSubmodules',
             command=self.fetch_immediate_submodules)
-        fetch_top_subs_btn.pack(side=tk.TOP)
+        fetch_top_subs_btn.pack(side=tk.TOP, pady=(10, 0), fill=tk.X)
 
         pane1 = tk.PanedWindow(
             orient=tk.VERTICAL, sashwidth=10, sashrelief=tk.SUNKEN,
@@ -968,8 +1067,12 @@ class FlatterWin:
             self.console.see(tk.END)
         self.console['state'] = tk.DISABLED
 
+    def refresh_ui(self):
+        self.graph_frame.update_ui(self.flatter)
+
     def fetch_immediate_submodules(self):
         self.flatter.fetch_immediate_submodules()
+        self.graph_frame.update_ui(self.flatter)
 
 if __name__ == '__main__':
     FlatterWin()
