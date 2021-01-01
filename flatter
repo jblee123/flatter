@@ -735,13 +735,17 @@ class SubmodFrame(tk.Frame):
         parent = args[0]
         self['bg'] = parent['bg']
 
-        border_canvas = tk.Canvas(self,
+        outer_frame = tk.Frame(self,
+            highlightthickness=0)
+        outer_frame.pack(anchor=tk.NW)
+
+        border_canvas = tk.Canvas(outer_frame,
             highlightthickness=0,
             bg=parent['bg'])
         border_canvas.bind(
             '<Configure>',
             lambda e: self.on_border_canvas_cfg(e))
-        border_canvas.pack(anchor=tk.NW, ipadx=4, ipady=4)
+        border_canvas.pack(side=tk.LEFT, ipadx=4, ipady=4)
         self.border_canvas = border_canvas
 
         data_frame = tk.Frame(border_canvas)
@@ -749,7 +753,10 @@ class SubmodFrame(tk.Frame):
         if submodule.missing_at_top:
             data_frame['bg'] = 'pink'
         elif not submodule.initialized:
-            data_frame['bg'] = 'light gray'
+            if submodule.is_top_level:
+                data_frame['bg'] = 'pink'
+            else:
+                data_frame['bg'] = 'light gray'
         else:
             data_frame['bg'] = 'white'
 
@@ -803,7 +810,8 @@ class SubmodFrame(tk.Frame):
         text['width'] = get_fit_text_width(text)
         text.pack(anchor=tk.W)
 
-        # data_frame.pack(anchor=tk.NW)
+        self.create_submodule_buttons(outer_frame, submodule)
+
         data_frame.pack(anchor=tk.CENTER, fill=tk.NONE, expand=True)
 
         left_spacer_frame = tk.Frame(self, bg=self['bg'], width=25)
@@ -816,6 +824,35 @@ class SubmodFrame(tk.Frame):
             frm = SubmodFrame(child, subs_frame)
 
         self.pack(anchor=tk.NW, pady=(20, 0))
+
+    def create_submodule_buttons(self, parent, submodule):
+        if (submodule.is_top_level or submodule.missing_at_top):
+            return
+
+        def make_relation_btn(relation, label):
+            if relation == CommitDirection.NONE:
+                return
+
+            btn = tk.Button(parent)
+            btn['bg'] = 'yellow3'
+            btn['activebackground'] = 'yellow3'
+            btn['padx'] = 0
+            btn['pady'] = 0
+            if relation == CommitDirection.MATCHES:
+                btn['text'] = 'MATCHES\n%s commit' % label
+                btn['bg'] = 'chartreuse3'
+                btn['activebackground'] = 'chartreuse3'
+                btn['state'] = tk.DISABLED
+            elif relation == CommitDirection.AHEAD:
+                btn['text'] = 'Is AHEAD\nof %s commit' % label
+            elif relation == CommitDirection.BEHIND:
+                btn['text'] = 'Is BEHIND\n%s commit' % label
+            elif relation == CommitDirection.ADJACENT:
+                btn['text'] = 'Is ADJACENT\nto %s commit' % label
+            btn.pack(side=tk.LEFT, fill=tk.BOTH)
+
+        make_relation_btn(submodule.relation_to_top_indexed, 'IDX')
+        make_relation_btn(submodule.relation_to_top_checked_out, 'CO')
 
     def on_border_canvas_cfg(self, event):
         left = 2
@@ -924,15 +961,10 @@ class FlatterWin:
         button_frame = tk.Frame(root, bg=bg_color)
         button_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
 
-        refresh_ui_btn = tk.Button(button_frame,
-            text='Refresh',
-            command=self.refresh_ui)
-        refresh_ui_btn.pack(side=tk.TOP, fill=tk.X)
-
         fetch_top_subs_btn = tk.Button(button_frame,
             text='Fetch Immediate\nSubmodules',
             command=self.fetch_immediate_submodules)
-        fetch_top_subs_btn.pack(side=tk.TOP, pady=(10, 0), fill=tk.X)
+        fetch_top_subs_btn.pack(side=tk.TOP, fill=tk.X)
 
         pane1 = tk.PanedWindow(
             orient=tk.VERTICAL, sashwidth=10, sashrelief=tk.SUNKEN,
@@ -1019,8 +1051,22 @@ class FlatterWin:
         if path:
             self.open_dir(path)
 
+    def do_long_job(self, work_fn):
+        # Calling root.update() after setting the cursor is supposed to allow
+        # the new cursor to take effect, but it doesn't so I decided to use
+        # root.after(), which works, but the timeout has to be set high enough.
+        # 1 ms did not work; 10 ms worked rarely; 50 ms seems to work every
+        # time.
+        self.root.config(cursor='wait')
+        def inner_work_fn():
+            work_fn()
+            self.root.config(cursor='')
+        self.root.after(50, inner_work_fn)
+
     def refresh_repo(self):
-        self.open_dir(self.flatter.get_last_path())
+        def do_work():
+            self.open_dir(self.flatter.get_last_path())
+        self.do_long_job(do_work)
 
     def open_dir(self, path, from_recent=False):
         if not path:
@@ -1067,12 +1113,11 @@ class FlatterWin:
             self.console.see(tk.END)
         self.console['state'] = tk.DISABLED
 
-    def refresh_ui(self):
-        self.graph_frame.update_ui(self.flatter)
-
     def fetch_immediate_submodules(self):
-        self.flatter.fetch_immediate_submodules()
-        self.graph_frame.update_ui(self.flatter)
+        def do_work():
+            self.flatter.fetch_immediate_submodules()
+            self.graph_frame.update_ui(self.flatter)
+        self.do_long_job(do_work)
 
 if __name__ == '__main__':
     FlatterWin()
