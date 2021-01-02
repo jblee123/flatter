@@ -50,7 +50,8 @@ class CommitDirection(enum.Enum):
     AHEAD = 2
     BEHIND = 3
     ADJACENT = 4
-    NONE = 5
+    MISSING = 5
+    NONE = 6
 
 
 class Result:
@@ -246,9 +247,16 @@ def get_submodule_commit(treeish, sub_path, console=None):
         return make_git_err_msg(cmd, out, err)
 
 
-def get_commit_is_ancestor(commit1, commit2):
+def get_commit_exists(commit, console=None):
+    commit_spec = '%s^{commit}' % commit
+    cmd = ['git', 'cat-file', '-e', commit_spec]
+    (ret, out, err) = exec_proc(cmd, console=console)
+    return ret == 0
+
+
+def get_commit_is_ancestor(commit1, commit2, console=None):
     cmd = ['git', 'merge-base', '--is-ancestor', commit1, commit2]
-    (ret, out, err) = exec_proc(cmd)
+    (ret, out, err) = exec_proc(cmd, console=console)
     if ret == 0:
         return Result(True)
     elif ret == 1:
@@ -650,6 +658,9 @@ class Flatter:
         self.do_derive_uninitialized_child_repos(self._root_sub)
 
     def do_calc_ahead_behind_adjacent(self, submodule_hash, top_sub_hash):
+        if not get_commit_exists(submodule_hash):
+            return Result(CommitDirection.MISSING)
+
         result = get_commit_is_ancestor(submodule_hash, top_sub_hash)
         if result:
             if result.get_val():
@@ -856,6 +867,7 @@ class InfoBox:
         AHEAD_OF_TXT = 'AHEAD OF'
         BEHIND_TXT = 'BEHIND'
         ADJACENT_TO_TXT = 'ADJACENT TO'
+        MISSING_TXT = 'MISSING'
         INDEXED_TXT = 'INDEXED'
         CHECKED_OUT_TXT = 'CHECKED_OUT'
         def make_relation_note(relation_txt, commit_type_txt):
@@ -875,6 +887,12 @@ class InfoBox:
                     ' (Adjacency occurs when the commits being compared are '
                     'on divergent branches.)')
                 text['height'] += 1
+            if relation_txt == MISSING_TXT:
+                note = (
+                    'The commit expected by this submodule\'s parent is %s '
+                    'from the copy of this submodule at the '
+                    'top level, which is notable but may not be an error.'
+                    % (relation_txt))
             text.insert('end', note)
 
             # Texts are 80 wide by default, but we only want it to use the width
@@ -904,6 +922,8 @@ class InfoBox:
                 make_relation_note(BEHIND_TXT, INDEXED_TXT)
             elif idx_relation == CommitDirection.ADJACENT:
                 make_relation_note(ADJACENT_TO_TXT, INDEXED_TXT)
+            elif idx_relation == CommitDirection.MISSING:
+                make_relation_note(MISSING_TXT, '')
 
             checked_out_relation = submodule.relation_to_top_checked_out
             if checked_out_relation == CommitDirection.AHEAD:
@@ -912,6 +932,8 @@ class InfoBox:
                 make_relation_note(BEHIND_TXT, CHECKED_OUT_TXT)
             elif checked_out_relation == CommitDirection.ADJACENT:
                 make_relation_note(ADJACENT_TO_TXT, CHECKED_OUT_TXT)
+            elif checked_out_relation == CommitDirection.MISSING:
+                make_relation_note(MISSING_TXT, '')
 
         center_on(dlg, InfoBox.root)
 
@@ -1057,6 +1079,8 @@ class SubmodFrame(tk.Frame):
                 btn['text'] = 'Is BEHIND\n%s commit' % label
             elif relation == CommitDirection.ADJACENT:
                 btn['text'] = 'Is ADJACENT\nto %s commit' % label
+            elif relation == CommitDirection.MISSING:
+                btn['text'] = 'Repo commit\nMISSING'
             btn.pack(side=tk.LEFT, fill=tk.BOTH)
 
         make_relation_btn(submodule.relation_to_top_indexed, 'IDX')
@@ -1333,7 +1357,7 @@ class FlatterWin:
     def fetch_immediate_submodules(self):
         def do_work():
             self.flatter.fetch_immediate_submodules()
-            self.graph_frame.update_ui(self.flatter)
+            self.open_dir(self.flatter.get_last_path())
         self.do_long_job(do_work)
 
 if __name__ == '__main__':
