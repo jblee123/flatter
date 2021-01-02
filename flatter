@@ -112,6 +112,14 @@ def exec_proc(cmd, capture_output=True, console=None):
         return subprocess.call(cmd, shell=shell)
 
 
+def remove_commit_descr_prefix(descr):
+    if descr.startswith('heads/'):
+        descr = descr[len('heads/'):]
+    elif descr.startswith('remotes/'):
+        descr = descr[len('remotes/'):]
+    return descr
+
+
 def is_descendant_of(w, other):
     if not w:
         return False
@@ -718,19 +726,217 @@ class Flatter:
             self.calc_stats_recursive(sub)
 
 
+def center_on(window, target):
+    window.update_idletasks()
+    height = window.winfo_height()
+    width = window.winfo_width()
+    x = int(target.winfo_x() + (target.winfo_width() / 2 - width / 2))
+    y = int(target.winfo_y() + (target.winfo_height() / 2 - height / 2))
+
+    window.geometry(f"{width}x{height}+{x}+{y}")
+
+
+class InfoBox:
+
+    root = None
+
+    def __init__(self, submodule):
+        my_class = self.__class__
+
+        if not hasattr(my_class, 'txt_font'):
+            default_font = tk.font.nametofont('TkDefaultFont')
+            my_class.txt_font = tk.font.Font(
+                family=default_font['family'], size=10)
+            my_class.txt_font_bold = my_class.txt_font.copy()
+            my_class.txt_font_bold['weight'] = 'bold'
+            my_class.txt_font_italic = my_class.txt_font.copy()
+            my_class.txt_font_italic['slant'] = 'italic'
+
+        dlg = tk.Toplevel(InfoBox.root)
+        dlg.wm_title('Details')
+        dlg['bd'] = 5
+
+        def make_text(parent):
+            text = tk.Text(parent, height=1, font=my_class.txt_font)
+            text.tag_configure('bold', font=my_class.txt_font_bold)
+            text.tag_configure('italic', font=my_class.txt_font_italic)
+            text['bg'] = text.master['bg']
+            text['relief'] = tk.FLAT
+            return text
+
+        o_len_pix = my_class.txt_font.measure('0')
+
+        def get_fit_text_width(txt_widget):
+            text = txt_widget.get(1.0, tk.END)
+            lines = text.split('\n')
+            line_lens_pix = [my_class.txt_font.measure(line) for line in lines]
+            txt_len_pix = max(line_lens_pix)
+            txt_len_chars = math.ceil(txt_len_pix / o_len_pix)
+            return txt_len_chars
+
+        row = 0
+
+        lbl = tk.Label(dlg,
+            text='Submodule %s' % submodule.name,
+            font=my_class.txt_font_bold)
+        lbl.grid(row=row, column=0, sticky=tk.W, columnspan=2, padx=2, pady=2)
+        row += 1
+
+        lbl = tk.Label(dlg, text='Path:')
+        lbl.grid(row=1, column=0, sticky=tk.W)
+        text = make_text(dlg)
+        text.insert('end', submodule.path)
+        text['state'] = tk.DISABLED
+        text['width'] = get_fit_text_width(text)
+        text.grid(row=row, column=1, sticky=tk.W, padx=(5, 0))
+        row += 1
+
+        lbl = tk.Label(dlg, text='Indexed commit:')
+        lbl.grid(row=2, column=0, sticky=tk.W)
+        text = make_text(dlg)
+        indexed_str = submodule.indexed_hash[:8]
+        if submodule.indexed_descr:
+            descr = remove_commit_descr_prefix(submodule.indexed_descr)
+            indexed_str += ' (%s)' % descr
+        text.insert('end', indexed_str)
+        text['state'] = tk.DISABLED
+        text['width'] = get_fit_text_width(text)
+        text.grid(row=row, column=1, sticky=tk.W, padx=(5, 0))
+        row += 1
+
+        lbl = tk.Label(dlg, text='Checked out commit:')
+        lbl.grid(row=3, column=0, sticky=tk.W)
+        text = make_text(dlg)
+        if submodule.initialized:
+            checked_out_str = submodule.checked_out_hash[:8]
+            if submodule.checked_out_descr:
+                descr = remove_commit_descr_prefix(submodule.checked_out_descr)
+                checked_out_str += ' (%s)' % descr
+            text.insert('end', checked_out_str)
+        else:
+            descr = 'Submodule is '
+            descr += 'derived' if submodule.derived else 'uninitialized'
+            text.insert('end', '%s' % descr, 'italic')
+        text['state'] = tk.DISABLED
+        text['width'] = get_fit_text_width(text)
+        text.grid(row=row, column=1, sticky=tk.W, padx=(5, 0))
+        row += 1
+
+        if submodule.is_top_level and not submodule.initialized:
+            text = make_text(dlg)
+            text['height'] = 2
+            text['bg'] = 'pink'
+            text.insert('end', 'Note: ', 'bold')
+            note = (
+                'This submodule is uninitialized at the top level,\n'
+                'which is probably incorrect.')
+            text.insert('end', note)
+            text['width'] = get_fit_text_width(text) + 1 # +1 for bolded text
+            text.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+            row += 1
+
+        if not submodule.is_top_level and submodule.missing_at_top:
+            text = make_text(dlg)
+            text['height'] = 2
+            text['bg'] = 'yellow3'
+            text.insert('end', 'Note: ', 'bold')
+            note = (
+                'This submodule does not exist at the top level of the\n'
+                'project, which is notable but may not be an error.')
+            text.insert('end', note)
+            text['width'] = get_fit_text_width(text) + 1 # +1 for bolded text
+            text.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+            row += 1
+
+        dlg.update()
+        dlg_width = dlg.winfo_width()
+
+        dlg.columnconfigure(1, weight=1)
+        AHEAD_OF_TXT = 'AHEAD OF'
+        BEHIND_TXT = 'BEHIND'
+        ADJACENT_TO_TXT = 'ADJACENT TO'
+        INDEXED_TXT = 'INDEXED'
+        CHECKED_OUT_TXT = 'CHECKED_OUT'
+        def make_relation_note(relation_txt, commit_type_txt):
+            nonlocal row
+            dlg.rowconfigure(row, weight=1)
+            text = make_text(dlg)
+            text['wrap'] = tk.WORD
+            text['bg'] = 'yellow3'
+            text.insert('end', 'Note: ', 'bold')
+            note = (
+                'The commit expected by this submodule\'s parent is %s '
+                'the commit currently %s by the copy of this submodule at the '
+                'top level, which is notable but may not be an error.'
+                % (relation_txt, commit_type_txt))
+            if relation_txt == ADJACENT_TO_TXT:
+                note += (
+                    ' (Adjacency occurs when the commits being compared are '
+                    'on divergent branches.)')
+                text['height'] += 1
+            text.insert('end', note)
+
+            # Texts are 80 wide by default, but we only want it to use the width
+            # of the dialog so far.
+            text['width'] = math.ceil(dlg_width / o_len_pix)
+
+            text.grid(
+                row=row, column=0, columnspan=2, sticky='nsew', pady=(5, 0))
+            row += 1
+
+            # Now, the text would have word wrapped, and we need the number of
+            # lines it would prefer to display so we can make sure the text
+            # widget is larget enough to display everything.
+            dlg.update()
+            num_lines = text.count('1.0', 'end', 'displaylines')
+            text['height'] = num_lines
+
+        can_relate_to_top = (
+            not submodule.is_top_level
+            and not submodule.missing_at_top)
+
+        if can_relate_to_top:
+            idx_relation = submodule.relation_to_top_indexed
+            if idx_relation == CommitDirection.AHEAD:
+                make_relation_note(AHEAD_OF_TXT, INDEXED_TXT)
+            elif idx_relation == CommitDirection.BEHIND:
+                make_relation_note(BEHIND_TXT, INDEXED_TXT)
+            elif idx_relation == CommitDirection.ADJACENT:
+                make_relation_note(ADJACENT_TO_TXT, INDEXED_TXT)
+
+            checked_out_relation = submodule.relation_to_top_checked_out
+            if checked_out_relation == CommitDirection.AHEAD:
+                make_relation_note(AHEAD_OF_TXT, CHECKED_OUT_TXT)
+            elif checked_out_relation == CommitDirection.BEHIND:
+                make_relation_note(BEHIND_TXT, CHECKED_OUT_TXT)
+            elif checked_out_relation == CommitDirection.ADJACENT:
+                make_relation_note(ADJACENT_TO_TXT, CHECKED_OUT_TXT)
+
+        center_on(dlg, InfoBox.root)
+
+        # make the dialog modal
+        dlg.focus_set()
+        dlg.grab_set()
+        dlg.wait_window()
+
+        self.dlg = dlg
+
+
 class SubmodFrame(tk.Frame):
     def __init__(self, submodule, *args, **kwargs):
+        my_class = self.__class__
+
         super(SubmodFrame, self).__init__(*args, **kwargs)
         self.submodule = submodule
 
-        if not hasattr(SubmodFrame, 'txt_font'):
+        if not hasattr(my_class, 'txt_font'):
             default_font = tk.font.nametofont('TkDefaultFont')
-            SubmodFrame.txt_font = tk.font.Font(
+            my_class.txt_font = tk.font.Font(
                 family=default_font['family'], size=10)
-            SubmodFrame.txt_font_bold = SubmodFrame.txt_font.copy()
-            SubmodFrame.txt_font_bold['weight'] = 'bold'
-            SubmodFrame.txt_font_italic = SubmodFrame.txt_font.copy()
-            SubmodFrame.txt_font_italic['slant'] = 'italic'
+            my_class.txt_font_bold = my_class.txt_font.copy()
+            my_class.txt_font_bold['weight'] = 'bold'
+            my_class.txt_font_italic = my_class.txt_font.copy()
+            my_class.txt_font_italic['slant'] = 'italic'
 
         parent = args[0]
         self['bg'] = parent['bg']
@@ -751,7 +957,7 @@ class SubmodFrame(tk.Frame):
         data_frame = tk.Frame(border_canvas)
 
         if submodule.missing_at_top:
-            data_frame['bg'] = 'pink'
+            data_frame['bg'] = 'yellow3'
         elif not submodule.initialized:
             if submodule.is_top_level:
                 data_frame['bg'] = 'pink'
@@ -761,24 +967,23 @@ class SubmodFrame(tk.Frame):
             data_frame['bg'] = 'white'
 
         def make_text():
-            text = tk.Text(data_frame, height=1, font=SubmodFrame.txt_font)
-            text.tag_configure('bold', font=SubmodFrame.txt_font_bold)
-            text.tag_configure('italic', font=SubmodFrame.txt_font_italic)
+            text = tk.Text(data_frame, height=1, font=my_class.txt_font)
+            text.tag_configure('bold', font=my_class.txt_font_bold)
+            text.tag_configure('italic', font=my_class.txt_font_italic)
             text['bg'] = text.master['bg']
             text['relief'] = tk.FLAT
             return text
 
-        o_len_pix = SubmodFrame.txt_font.measure('0')
+        o_len_pix = my_class.txt_font.measure('0')
 
         def get_fit_text_width(txt_widget):
             text = txt_widget.get(1.0, tk.END)
-            txt_len_pix = SubmodFrame.txt_font.measure(text)
+            txt_len_pix = my_class.txt_font.measure(text)
             txt_len_chars = math.ceil(txt_len_pix / o_len_pix)
             return txt_len_chars
 
         text = make_text()
         text.insert('end', submodule.name, 'bold')
-        text.insert('end', ' (path: %s)' % submodule.path)
         text['state'] = tk.DISABLED
         text['width'] = get_fit_text_width(text)
         text.pack(anchor=tk.W)
@@ -787,18 +992,14 @@ class SubmodFrame(tk.Frame):
 
         indexed_str = submodule.indexed_hash[:8]
         if submodule.indexed_descr:
-            descr = submodule.indexed_descr
-            if descr.startswith('heads/'):
-                descr = descr[len('heads/'):]
+            descr = remove_commit_descr_prefix(submodule.indexed_descr)
             indexed_str += ' (%s)' % descr
         text.insert('end', 'Idx commit: %s' % indexed_str)
 
         if submodule.initialized:
             checked_out_str = submodule.checked_out_hash[:8]
             if submodule.checked_out_descr:
-                descr = submodule.checked_out_descr
-                if descr.startswith('heads/'):
-                    descr = descr[len('heads/'):]
+                descr = remove_commit_descr_prefix(submodule.checked_out_descr)
                 checked_out_str += ' (%s)' % descr
             text.insert('end', ', Checked out: %s' % checked_out_str)
         else:
@@ -826,6 +1027,12 @@ class SubmodFrame(tk.Frame):
         self.pack(anchor=tk.NW, pady=(20, 0))
 
     def create_submodule_buttons(self, parent, submodule):
+        info_btn = tk.Button(parent,
+            text='Details',
+            padx=5, pady=0,
+            command=lambda: self.show_submodule_info(submodule))
+        info_btn.pack(side=tk.LEFT, fill=tk.BOTH)
+
         if (submodule.is_top_level or submodule.missing_at_top):
             return
 
@@ -871,6 +1078,9 @@ class SubmodFrame(tk.Frame):
         self.border_canvas.create_rectangle(
             left, top, right, bottom,
             width=2, outline=outline, dash=dash, tag='border_line')
+
+    def show_submodule_info(self, submodule):
+        InfoBox(submodule)
 
 
 class GraphFrame(tk.Frame):
@@ -944,6 +1154,9 @@ class FlatterWin:
         if root is None:
             root = tk.Tk()
             root['bg'] = 'light grey'
+
+        InfoBox.root = root
+
         bg_color = root['bg']
         self.root = root
         self.flatter = Flatter(FlatterWinConsole(self))
