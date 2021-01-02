@@ -42,6 +42,7 @@ import sys
 import tkinter.filedialog
 import tkinter.font
 import tkinter.messagebox
+import tkinter.ttk as ttk
 
 
 class CommitDirection(enum.Enum):
@@ -1163,6 +1164,9 @@ class FlatterWin:
 
         root.wm_title('Flatter!')
 
+        style = ttk.Style()
+        style.configure('TPanedwindow', background=bg_color)
+
         w = root.winfo_screenwidth() / 2
         h = root.winfo_screenheight() / 2
         root.geometry('%dx%d' % (w, h))
@@ -1179,9 +1183,7 @@ class FlatterWin:
             command=self.fetch_immediate_submodules)
         fetch_top_subs_btn.pack(side=tk.TOP, fill=tk.X)
 
-        pane1 = tk.PanedWindow(
-            orient=tk.VERTICAL, sashwidth=10, sashrelief=tk.SUNKEN,
-            showhandle=True)
+        pane1 = ttk.PanedWindow(orient=tk.VERTICAL)
         pane1.pack(fill=tk.BOTH, expand=True)
 
         self.graph_frame = GraphFrame(pane1)
@@ -1198,8 +1200,10 @@ class FlatterWin:
         pane1.update()
         pane_height = pane1.winfo_height()
         top_height = max(pane_height - 100, 100)
-        pane1.add(self.graph_frame, height=top_height)
-        pane1.add(console_frame, height=100)
+        pane1.add(self.graph_frame, weight=1)
+        pane1.add(console_frame)
+        pane1.update()
+        pane1.sashpos(0, top_height)
 
         def on_mousewheel(event):
             possible_handlers = [self.graph_frame]
