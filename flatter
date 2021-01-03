@@ -265,6 +265,15 @@ def get_commit_is_ancestor(commit1, commit2, console=None):
         return make_git_err_msg(cmd, out, err)
 
 
+def get_repo_is_dirty(console=None):
+    cmd = 'git status --porcelain'
+    (ret, out, err) = exec_proc(cmd, console=console)
+    if ret == 0:
+        return Result(out.strip() != '')
+    else:
+        return make_git_err_msg(cmd, out, err)
+
+
 class Submodule:
     def __init__(self,
         name, path,
@@ -290,6 +299,24 @@ class Submodule:
 
     def add_sub(self, sub):
         self.subs.append(sub)
+
+
+class SyncableCommit():
+    def __init__(self, hash, exists_at_top=True):
+        self.hash = hash
+        self.exists_at_top = exists_at_top
+
+
+class SyncableRepo():
+    def __init__(self, top_sub, dirty=False):
+        self.top_sub = top_sub
+        self.dirty = dirty
+        self.commits = []
+
+    def add_commit(self, commit_hash, exists_at_top):
+        if any(commit.hash == commit_hash for commit in self.commits):
+            return
+        self.commits.append(SyncableCommit(commit_hash, exists_at_top))
 
 
 class Flatter:
@@ -548,23 +575,23 @@ class Flatter:
     def fetch_submodule(self):
         result = get_git_remotes(console=self._console)
         if not result:
-            self._console.write(
+            self.write_console(
                 'Error getting remotes for submodule:\n'
                 '  %s' % result.get_err())
             return result
 
         remotes = result.get_val()
         if remotes:
-            self._console.write('Found remote(s): ' + ', '.join(remotes))
+            self.write_console('Found remote(s): ' + ', '.join(remotes))
         else:
-            self._console.write('Found no remotes.')
+            self.write_console('Found no remotes.')
 
         had_err = False
         for remote in remotes:
             result = fetch_git_remote(remote, console=self._console)
             if not result:
                 had_err = True
-                self._console.write(
+                self.write_console(
                     'Error fetching submodule:\n'
                     '  %s' % result.get_err())
 
@@ -577,14 +604,14 @@ class Flatter:
         had_err = False
         for sub in self._root_sub.subs:
             path = os.path.join(self._last_path, sub.path)
-            self._console.write('Entering directory: ' + path)
+            self.write_console('Entering directory: ' + path)
             with DoInExistingDir(path) as ctx:
                 if ctx:
                     if not self.fetch_submodule():
                         had_err = True
                 else:
                     had_err = True
-                    self._console.write(
+                    self.write_console(
                         'Could not switch to directory %s '
                         'for submodule %s\n' % (sub.path, sub.name))
 
@@ -598,7 +625,7 @@ class Flatter:
         sub_info = get_subs_from_gitmodules(
             submodule.indexed_hash, console=self._console)
         if not sub_info:
-            self._console.write(
+            self.write_console(
                 'Couldn\'t get submodule info for submodule '
                 '%s\n:  err: %s' % (submodule.name, sub_info.get_err()))
             return
@@ -607,7 +634,7 @@ class Flatter:
             sub_hash = get_submodule_commit(
                 submodule.indexed_hash, sub_sub_path, console=self._console)
             if not sub_hash:
-                self._console.write(
+                self.write_console(
                     'Could not switch to directory %s for submodule %s\n'
                     % (path, submodule.name))
                 continue
@@ -634,12 +661,12 @@ class Flatter:
         # jump into top-level sub and:
         top_sub = self._top_subs[submodule.name]
         path = os.path.join(self._last_path, top_sub.path)
-        self._console.write('Entering directory: ' + path)
+        self.write_console('Entering directory: ' + path)
         with DoInExistingDir(path) as ctx:
             if ctx:
                 self.create_derived_repo_children(submodule)
             else:
-                self._console.write(
+                self.write_console(
                     'Could not switch to directory %s '
                     'for submodule %s\n' % (path, submodule.name))
                 return
@@ -684,7 +711,7 @@ class Flatter:
             if result:
                 submodule.relation_to_top_indexed = result.get_val()
             else:
-                self._console.write(
+                self.write_console(
                     'Error determining commit ancestry:\n'
                     '  %s' % result.get_err())
 
@@ -694,7 +721,7 @@ class Flatter:
             if result:
                 submodule.relation_to_top_checked_out = result.get_val()
             else:
-                self._console.write(
+                self.write_console(
                     'Error determining commit ancestry:\n'
                     '  %s' % result.get_err())
 
@@ -704,7 +731,7 @@ class Flatter:
             if ctx:
                 self.calc_ahead_behind_adjacent_in_dir(submodule, top_sub)
             else:
-                self._console.write(
+                self.write_console(
                     'Could not switch to directory %s '
                     'for submodule %s\n' % (path, top_sub.name))
                 return
@@ -737,6 +764,62 @@ class Flatter:
         for sub in submodule.subs:
             self.calc_stats_recursive(sub)
 
+    def collect_submodules_list(self, submodule):
+        subs = [submodule]
+
+        for sub in submodule.subs:
+            subs += self.collect_submodules_list(sub)
+
+        return subs
+
+    def calc_syncable_repo_to_top_data(self, repo):
+        path = os.path.join(self._last_path, repo.top_sub.path)
+        with DoInExistingDir(path) as ctx:
+            if ctx:
+                result = get_repo_is_dirty(self._console)
+                if result:
+                    repo.dirty = result.get_val()
+                else:
+                    return result
+
+                for commit in repo.commits:
+                    commit.exists_at_top = get_commit_exists(
+                        commit.hash, self._console)
+            else:
+                return Result.err(
+                    'Could not switch to directory %s '
+                    'for submodule %s\n' % (path, repo.top_sub.name))
+
+        return Result()
+
+    def calc_syncable_to_top_data(self, submodule):
+        all_subs_list = self.collect_submodules_list(submodule)
+        all_subs_list = [sub for sub in all_subs_list
+            if self.sub_exists_at_top_level(sub)]
+        unique_names = set([sub.name for sub in all_subs_list])
+
+        syncable_repos = dict(
+            [(name, SyncableRepo(self._top_subs[name]))
+                for name in unique_names])
+
+        for sub in all_subs_list:
+            repo = syncable_repos[sub.name]
+            repo.add_commit(sub.indexed_hash, True)
+
+        bad_repo_names = []
+        for repo in syncable_repos.values():
+            result = self.calc_syncable_repo_to_top_data(repo)
+            if not result:
+                self.write_console(
+                    'Could not get sync data for repo %s:\n'
+                    '  %s' % (repo.top_sub.name, result.get_err()))
+                bad_repo_names.append(repo.top_sub.name)
+
+        for name in bad_repo_names:
+            syncable_repos.pop(name)
+
+        return list(syncable_repos.values())
+
 
 def center_on(window, target):
     window.update_idletasks()
@@ -744,6 +827,7 @@ def center_on(window, target):
     width = window.winfo_width()
     x = int(target.winfo_x() + (target.winfo_width() / 2 - width / 2))
     y = int(target.winfo_y() + (target.winfo_height() / 2 - height / 2))
+    y = max(y, 0)
 
     window.geometry(f"{width}x{height}+{x}+{y}")
 
@@ -1002,19 +1086,14 @@ class SyncBox:
 
         row = 0
 
-        tk.Label(dlg, text='Choose actions:').grid(
+        tk.Label(dlg, text='Choose repos and commits:').grid(
             row=row, column=0, sticky=tk.W)
         row += 1
 
-        actions_frame = ScrollableFrame(dlg, relief=tk.SUNKEN, bd=2)
+        repos_frame = ScrollableFrame(dlg, relief=tk.SUNKEN, bd=2)
 
-        # Temp sample action frame content.
-        for i in range(20):
-            lbl = tk.Label(actions_frame.scrollframe, text='action %d' % i)
-            lbl.pack(anchor=tk.NW)
-
-        actions_frame.grid(row=row, column=0, sticky=tk.NSEW)
-        dlg.rowconfigure(row, weight=1)
+        repos_frame.grid(row=row, column=0, sticky=tk.NSEW)
+        dlg.rowconfigure(row, weight=2)
         row += 1
 
         tk.Label(dlg, text='Commands:', anchor=tk.W).grid(
@@ -1024,7 +1103,7 @@ class SyncBox:
         cmds_frame = tk.Frame(dlg)
 
         cmds_scrollbar = tk.Scrollbar(cmds_frame)
-        cmds_txt = tk.Text(cmds_frame, bg='light grey')
+        cmds_txt = tk.Text(cmds_frame, bg='light grey', height=14)
         cmds_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         cmds_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         cmds_scrollbar.config(command=cmds_txt.yview)
@@ -1041,12 +1120,73 @@ class SyncBox:
 
         center_on(dlg, SyncBox.root)
 
+        self.dlg = dlg
+
+        repos = flatter.calc_syncable_to_top_data(submodule)
+        repos = sorted(repos, key=lambda repo: repo.top_sub.name)
+
+        for repo in repos:
+            frame = self.create_syncable_frame(repo, repos_frame.scrollframe)
+            frame.pack(anchor=tk.NW, fill=tk.X, expand=True)
+
         # make the dialog modal
         dlg.focus_set()
         dlg.grab_set()
         dlg.wait_window()
 
-        self.dlg = dlg
+    def create_syncable_frame(self, repo, parent):
+        def on_name_chkbtn_changed():
+            for radio in commit_radios:
+                enable = radio.commit.exists_at_top and name_chkbtn_var.get()
+                radio['state'] = tk.NORMAL if enable else tk.DISABLED
+
+        outer_frame = tk.Frame(parent,
+            highlightbackground='black',
+            highlightthickness=1,
+            relief=tk.FLAT)
+
+        can_update_repo = not repo.dirty
+        name_chkbtn_var = tk.IntVar(value=1 if can_update_repo else 0)
+        name_chkbtn = tk.Checkbutton(outer_frame,
+            text=repo.top_sub.name,
+            anchor=tk.NW,
+            variable=name_chkbtn_var,
+            state=tk.NORMAL if can_update_repo else tk.DISABLED,
+            command=on_name_chkbtn_changed)
+        name_chkbtn.pack(anchor=tk.NW, fill=tk.X, expand=True)
+
+        commit_frame = tk.Frame(outer_frame, bd=2, relief=tk.SUNKEN)
+        commit_frame.pack(anchor=tk.NW, fill=tk.X, expand=True)
+
+        commit_radios = []
+        commit_radio_var = tk.IntVar()
+        commit_radio_val = 0
+        first_good_commit = -1
+        for i, commit in enumerate(repo.commits):
+            if (first_good_commit == -1) and commit.exists_at_top:
+                first_good_commit = i
+            txt = commit.hash[:8]
+            if not commit.exists_at_top:
+                txt += ' (Doesn\'t exist at top!)'
+            radio = tk.Radiobutton(commit_frame,
+                text=txt,
+                anchor=tk.NW,
+                variable=commit_radio_var,
+                value=commit_radio_val,
+                state=tk.NORMAL if commit.exists_at_top else tk.DISABLED)
+            radio.commit = commit
+            commit_radio_val += 1
+            radio.pack(anchor=tk.NW, fill=tk.X, expand=True, padx=(5, 0))
+            commit_radios.append(radio)
+
+        if first_good_commit > -1:
+            commit_radio_var.set(first_good_commit)
+
+        outer_frame.name_chkbtn_var = name_chkbtn_var
+        outer_frame.commit_radios = commit_radios
+        outer_frame.commit_radio_var = commit_radio_var
+
+        return outer_frame
 
 
 class SubmodFrame(tk.Frame):
@@ -1165,7 +1305,7 @@ class SubmodFrame(tk.Frame):
         info_btn = tk.Button(parent,
             text='Sync Top',
             padx=0, pady=0,
-            command=lambda: self.sync_to_top(submodule.name))
+            command=lambda: self.sync_to_top(submodule))
         info_btn.pack(side=tk.LEFT, fill=tk.BOTH)
 
     def create_relation_labels(self, parent, submodule):
