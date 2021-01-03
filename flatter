@@ -748,6 +748,48 @@ def center_on(window, target):
     window.geometry(f"{width}x{height}+{x}+{y}")
 
 
+def set_up_wheel_scrolling(canvas):
+    def on_mousewheel(event):
+        delta = 1 if event.delta > 0 else -1
+        canvas.yview_scroll(-delta, 'units')
+
+    def bound_to_mousewheel(event):
+        canvas.bind_all('<MouseWheel>', on_mousewheel)
+        canvas.bind_all('<Button-4>', on_mousewheel)
+        canvas.bind_all('<Button-5>', on_mousewheel)
+
+    def unbound_to_mousewheel(event):
+        canvas.unbind_all('<MouseWheel>')
+        canvas.unbind_all('<Button-4>')
+        canvas.unbind_all('<Button-5>')
+
+    canvas.bind('<Enter>', bound_to_mousewheel)
+    canvas.bind('<Leave>', unbound_to_mousewheel)
+
+
+class ScrollableFrame(tk.Frame):
+    def __init__(self, container, *args, **kwargs):
+        super().__init__(container, *args, **kwargs)
+        canvas = tk.Canvas(self)
+        scrollbar = tk.Scrollbar(self, orient='vertical', command=canvas.yview)
+        self.scrollframe = tk.Frame(canvas)
+
+        self.scrollframe.bind(
+            '<Configure>',
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox('all')
+            )
+        )
+
+        canvas.create_window((0, 0), window=self.scrollframe, anchor=tk.NW)
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        set_up_wheel_scrolling(canvas)
+
 class InfoBox:
 
     root = None
@@ -945,12 +987,75 @@ class InfoBox:
         self.dlg = dlg
 
 
+class SyncBox:
+
+    root = None
+
+    def __init__(self, submodule, flatter):
+        my_class = self.__class__
+
+        dlg = tk.Toplevel(SyncBox.root)
+        dlg.wm_title('Sync Top')
+        dlg['bd'] = 2
+
+        dlg.columnconfigure(0, weight=1)
+
+        row = 0
+
+        tk.Label(dlg, text='Choose actions:').grid(
+            row=row, column=0, sticky=tk.W)
+        row += 1
+
+        actions_frame = ScrollableFrame(dlg, relief=tk.SUNKEN, bd=2)
+
+        # Temp sample action frame content.
+        for i in range(20):
+            lbl = tk.Label(actions_frame.scrollframe, text='action %d' % i)
+            lbl.pack(anchor=tk.NW)
+
+        actions_frame.grid(row=row, column=0, sticky=tk.NSEW)
+        dlg.rowconfigure(row, weight=1)
+        row += 1
+
+        tk.Label(dlg, text='Commands:', anchor=tk.W).grid(
+            row=row, column=0, sticky=tk.EW, pady=(5, 0))
+        row += 1
+
+        cmds_frame = tk.Frame(dlg)
+
+        cmds_scrollbar = tk.Scrollbar(cmds_frame)
+        cmds_txt = tk.Text(cmds_frame, bg='light grey')
+        cmds_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        cmds_txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cmds_scrollbar.config(command=cmds_txt.yview)
+        cmds_txt.config(yscrollcommand=cmds_scrollbar.set)
+        self.cmds_txt = cmds_txt
+
+        cmds_frame.grid(row=row, column=0, sticky=tk.NSEW)
+        dlg.rowconfigure(row, weight=1)
+        row += 1
+
+        # Temp sample commands
+        for i in range(40):
+            cmds_txt.insert(tk.END, '> line %d\n' % i)
+
+        center_on(dlg, SyncBox.root)
+
+        # make the dialog modal
+        dlg.focus_set()
+        dlg.grab_set()
+        dlg.wait_window()
+
+        self.dlg = dlg
+
+
 class SubmodFrame(tk.Frame):
-    def __init__(self, submodule, *args, **kwargs):
+    def __init__(self, submodule, flatter, *args, **kwargs):
         my_class = self.__class__
 
         super(SubmodFrame, self).__init__(*args, **kwargs)
         self.submodule = submodule
+        self.flatter = flatter
 
         if not hasattr(my_class, 'txt_font'):
             default_font = tk.font.nametofont('TkDefaultFont')
@@ -1046,7 +1151,7 @@ class SubmodFrame(tk.Frame):
         subs_frame.pack(anchor='nw')
 
         for child in submodule.subs:
-            frm = SubmodFrame(child, subs_frame)
+            frm = SubmodFrame(child, self.flatter, subs_frame)
 
         self.pack(anchor=tk.NW, pady=(20, 0))
 
@@ -1055,6 +1160,12 @@ class SubmodFrame(tk.Frame):
             text='Details',
             padx=5, pady=0,
             command=lambda: self.show_submodule_info(submodule))
+        info_btn.pack(side=tk.LEFT, fill=tk.BOTH)
+
+        info_btn = tk.Button(parent,
+            text='Sync Top',
+            padx=0, pady=0,
+            command=lambda: self.sync_to_top(submodule.name))
         info_btn.pack(side=tk.LEFT, fill=tk.BOTH)
 
     def create_relation_labels(self, parent, submodule):
@@ -1116,6 +1227,9 @@ class SubmodFrame(tk.Frame):
     def show_submodule_info(self, submodule):
         InfoBox(submodule)
 
+    def sync_to_top(self, submodule):
+        SyncBox(submodule, self.flatter)
+
 
 class GraphFrame(tk.Frame):
     def __init__(self, parent=None):
@@ -1151,16 +1265,10 @@ class GraphFrame(tk.Frame):
 
         canvas.pack(side=tk.LEFT, expand=tk.YES, fill=tk.BOTH)
 
+        set_up_wheel_scrolling(canvas)
+
         self.canvas = canvas
         self.main_frm = main_frm
-
-    def on_mousewheel(self, event):
-        if not is_descendant_of(event.widget, self):
-            return False
-
-        delta = 1 if event.delta > 0 else -1
-        self.canvas.yview_scroll(-delta, 'units')
-        return True
 
     def update_ui(self, flatter):
         for submod_frame in self.submod_frames:
@@ -1171,7 +1279,7 @@ class GraphFrame(tk.Frame):
         root_sub = flatter.get_root_sub()
 
         for sub in root_sub.subs:
-            frm = SubmodFrame(sub, self.main_frm)
+            frm = SubmodFrame(sub, self.flatter, self.main_frm)
             self.submod_frames.append(frm)
 
 
@@ -1190,6 +1298,7 @@ class FlatterWin:
             root['bg'] = 'light grey'
 
         InfoBox.root = root
+        SyncBox.root = root
 
         bg_color = root['bg']
         self.root = root
@@ -1237,16 +1346,6 @@ class FlatterWin:
         pane1.add(console_frame)
         pane1.update()
         pane1.sashpos(0, top_height)
-
-        def on_mousewheel(event):
-            possible_handlers = [self.graph_frame]
-            for w in possible_handlers:
-                if w.on_mousewheel(event):
-                    return
-
-        root.bind_all("<MouseWheel>", on_mousewheel)
-        root.bind_all("<Button-4>", on_mousewheel)
-        root.bind_all("<Button-5>", on_mousewheel)
 
         root.after(50, lambda: self.open_dir('D:/code/flatter/test_repos/blee/app1')) # jbltemp
 
