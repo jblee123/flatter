@@ -1035,6 +1035,7 @@ class SubmodFrame(tk.Frame):
         text.pack(anchor=tk.W)
 
         self.create_submodule_buttons(outer_frame, submodule)
+        self.create_relation_labels(outer_frame, submodule)
 
         data_frame.pack(anchor=tk.CENTER, fill=tk.NONE, expand=True)
 
@@ -1056,35 +1057,43 @@ class SubmodFrame(tk.Frame):
             command=lambda: self.show_submodule_info(submodule))
         info_btn.pack(side=tk.LEFT, fill=tk.BOTH)
 
-        if (submodule.is_top_level or submodule.missing_at_top):
-            return
+    def create_relation_labels(self, parent, submodule):
+        frm = tk.Frame(parent)
 
-        def make_relation_btn(relation, label):
-            if relation == CommitDirection.NONE:
-                return
+        def make_relation_lbl(relation, commit_type_txt):
+            if (relation == CommitDirection.NONE
+                or relation == CommitDirection.MATCHES):
+                return None
 
-            btn = tk.Button(parent)
-            btn['bg'] = 'yellow3'
-            btn['activebackground'] = 'yellow3'
-            btn['padx'] = 0
-            btn['pady'] = 0
-            if relation == CommitDirection.MATCHES:
-                btn['text'] = 'MATCHES\n%s commit' % label
-                btn['bg'] = 'chartreuse3'
-                btn['activebackground'] = 'chartreuse3'
-                btn['state'] = tk.DISABLED
-            elif relation == CommitDirection.AHEAD:
-                btn['text'] = 'Is AHEAD\nof %s commit' % label
+            lbl = tk.Label(frm,
+                anchor=tk.E,
+                borderwidth=1,
+                relief='solid',
+                pady=4)
+            lbl['bg'] = 'yellow3'
+            if relation == CommitDirection.AHEAD:
+                lbl['text'] = 'AHEAD of %s commit' % commit_type_txt
             elif relation == CommitDirection.BEHIND:
-                btn['text'] = 'Is BEHIND\n%s commit' % label
+                lbl['text'] = 'BEHIND %s commit' % commit_type_txt
             elif relation == CommitDirection.ADJACENT:
-                btn['text'] = 'Is ADJACENT\nto %s commit' % label
+                lbl['text'] = 'ADJACENT to %s commit' % commit_type_txt
             elif relation == CommitDirection.MISSING:
-                btn['text'] = 'Repo commit\nMISSING'
-            btn.pack(side=tk.LEFT, fill=tk.BOTH)
+                lbl['text'] = 'Repo commit MISSING'
+            else:
+                lbl['text'] = ''
 
-        make_relation_btn(submodule.relation_to_top_indexed, 'IDX')
-        make_relation_btn(submodule.relation_to_top_checked_out, 'CO')
+            return lbl
+
+        idx_lbl = make_relation_lbl(submodule.relation_to_top_indexed, 'IDX')
+        co_lbl = make_relation_lbl(submodule.relation_to_top_checked_out, 'CO')
+
+        if idx_lbl:
+            idx_lbl.grid(row=0, column=0, sticky='nsew')
+        if co_lbl:
+            co_lbl.grid(row=1, column=0, sticky='nsew')
+
+        if idx_lbl or co_lbl:
+            frm.pack(side=tk.LEFT)
 
     def on_border_canvas_cfg(self, event):
         left = 2
