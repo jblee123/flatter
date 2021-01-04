@@ -302,8 +302,9 @@ class Submodule:
 
 
 class SyncableCommit():
-    def __init__(self, hash, exists_at_top=True):
+    def __init__(self, hash, descr, exists_at_top=True):
         self.hash = hash
+        self.descr = descr
         self.exists_at_top = exists_at_top
 
 
@@ -313,10 +314,11 @@ class SyncableRepo():
         self.dirty = dirty
         self.commits = []
 
-    def add_commit(self, commit_hash, exists_at_top):
+    def add_commit(self, commit_hash, commit_descr, exists_at_top):
         if any(commit.hash == commit_hash for commit in self.commits):
             return
-        self.commits.append(SyncableCommit(commit_hash, exists_at_top))
+        self.commits.append(
+            SyncableCommit(commit_hash, commit_descr, exists_at_top))
 
 
 class Flatter:
@@ -490,12 +492,16 @@ class Flatter:
                 indexed_descr = indexed_sub[2]
                 indexed_descr = re.sub(r'^\(', '', indexed_descr)
                 indexed_descr = re.sub(r'\)$', '', indexed_descr)
+                if indexed_hash.startswith(indexed_descr):
+                    indexed_descr = ''
 
             checked_out_descr = ''
             if len(checked_out_sub) >= 3:
                 checked_out_descr = checked_out_sub[2]
                 checked_out_descr = re.sub(r'^\(', '', checked_out_descr)
                 checked_out_descr = re.sub(r'\)$', '', checked_out_descr)
+                if checked_out_hash.startswith(checked_out_descr):
+                    checked_out_descr = ''
 
             new_sub = Submodule(
                 name=sub_name,
@@ -797,6 +803,8 @@ class Flatter:
         all_subs_list = [sub for sub in all_subs_list
             if self.sub_exists_at_top_level(sub)]
         unique_names = set([sub.name for sub in all_subs_list])
+        top_level_sub_names = [sub.name for sub in all_subs_list
+            if sub == self._top_subs[sub.name]]
 
         syncable_repos = dict(
             [(name, SyncableRepo(self._top_subs[name]))
@@ -804,7 +812,7 @@ class Flatter:
 
         for sub in all_subs_list:
             repo = syncable_repos[sub.name]
-            repo.add_commit(sub.indexed_hash, True)
+            repo.add_commit(sub.indexed_hash, sub.indexed_descr, False)
 
         bad_repo_names = []
         for repo in syncable_repos.values():
@@ -816,6 +824,33 @@ class Flatter:
                 bad_repo_names.append(repo.top_sub.name)
 
         for name in bad_repo_names:
+            syncable_repos.pop(name)
+
+        filtered_names = []
+        for repo in syncable_repos.values():
+            top_sub = self._top_subs[repo.top_sub.name]
+
+            # The user selected a tree of submodules to updated, on of which may
+            # have been top-level if the user chose to sync a root downward.
+            # However, we never want to update that top-level submodule since
+            # we'd effectively be updating it to itself (so no need). At this
+            # point, however, we only have references to top-level subs since
+            # the non-top-level ones have been mapped to their analogous
+            # top-level subs. That's why we stored the name of the at-most-one
+            # original top-level sub above (where we knew what it was) -- so we
+            # could filter it out here.
+            if repo.top_sub.name in top_level_sub_names:
+                filtered_names.append(repo.top_sub.name)
+                continue
+
+            can_only_update_to_what_is_already_there = (
+                len(repo.commits) == 1
+                and top_sub.checked_out_hash == repo.commits[0].hash)
+            if can_only_update_to_what_is_already_there:
+                filtered_names.append(repo.top_sub.name)
+                continue
+
+        for name in filtered_names:
             syncable_repos.pop(name)
 
         return list(syncable_repos.values())
@@ -986,7 +1021,7 @@ class InfoBox:
             text.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
             row += 1
 
-        dlg.update()
+        dlg.update_idletasks()
         dlg_width = dlg.winfo_width()
 
         dlg.columnconfigure(1, weight=1)
@@ -1032,7 +1067,7 @@ class InfoBox:
             # Now, the text would have word wrapped, and we need the number of
             # lines it would prefer to display so we can make sure the text
             # widget is larget enough to display everything.
-            dlg.update()
+            dlg.update_idletasks()
             num_lines = text.count('1.0', 'end', 'displaylines')
             text['height'] = num_lines
 
@@ -1076,6 +1111,8 @@ class SyncBox:
     root = None
 
     def __init__(self, submodule, flatter):
+        self.flatter = flatter
+
         my_class = self.__class__
 
         dlg = tk.Toplevel(SyncBox.root)
@@ -1114,10 +1151,6 @@ class SyncBox:
         dlg.rowconfigure(row, weight=1)
         row += 1
 
-        # Temp sample commands
-        for i in range(40):
-            cmds_txt.insert(tk.END, '> line %d\n' % i)
-
         center_on(dlg, SyncBox.root)
 
         self.dlg = dlg
@@ -1125,9 +1158,13 @@ class SyncBox:
         repos = flatter.calc_syncable_to_top_data(submodule)
         repos = sorted(repos, key=lambda repo: repo.top_sub.name)
 
+        self.repo_frames = []
         for repo in repos:
             frame = self.create_syncable_frame(repo, repos_frame.scrollframe)
             frame.pack(anchor=tk.NW, fill=tk.X, expand=True)
+            self.repo_frames.append(frame)
+
+        self.update_commands()
 
         # make the dialog modal
         dlg.focus_set()
@@ -1139,6 +1176,10 @@ class SyncBox:
             for radio in commit_radios:
                 enable = radio.commit.exists_at_top and name_chkbtn_var.get()
                 radio['state'] = tk.NORMAL if enable else tk.DISABLED
+            self.update_commands()
+
+        def on_commit_radio_changed():
+            self.update_commands()
 
         outer_frame = tk.Frame(parent,
             highlightbackground='black',
@@ -1147,8 +1188,11 @@ class SyncBox:
 
         can_update_repo = not repo.dirty
         name_chkbtn_var = tk.IntVar(value=1 if can_update_repo else 0)
+        name_txt = repo.top_sub.name
+        if not can_update_repo:
+            name_txt += ' (Repo is dirty!)'
         name_chkbtn = tk.Checkbutton(outer_frame,
-            text=repo.top_sub.name,
+            text=name_txt,
             anchor=tk.NW,
             variable=name_chkbtn_var,
             state=tk.NORMAL if can_update_repo else tk.DISABLED,
@@ -1166,27 +1210,85 @@ class SyncBox:
             if (first_good_commit == -1) and commit.exists_at_top:
                 first_good_commit = i
             txt = commit.hash[:8]
+            if commit.descr:
+                txt += ' (%s)' % remove_commit_descr_prefix(commit.descr)
             if not commit.exists_at_top:
                 txt += ' (Doesn\'t exist at top!)'
+            enable = commit.exists_at_top and can_update_repo
             radio = tk.Radiobutton(commit_frame,
                 text=txt,
                 anchor=tk.NW,
                 variable=commit_radio_var,
                 value=commit_radio_val,
-                state=tk.NORMAL if commit.exists_at_top else tk.DISABLED)
+                state=tk.NORMAL if enable else tk.DISABLED,
+                command=on_commit_radio_changed)
             radio.commit = commit
             commit_radio_val += 1
             radio.pack(anchor=tk.NW, fill=tk.X, expand=True, padx=(5, 0))
             commit_radios.append(radio)
 
-        if first_good_commit > -1:
+        any_valid_commits = first_good_commit > -1
+        if any_valid_commits:
             commit_radio_var.set(first_good_commit)
+        else:
+            name_chkbtn_var.set(0)
+            name_chkbtn['state'] = tk.DISABLED
 
         outer_frame.name_chkbtn_var = name_chkbtn_var
         outer_frame.commit_radios = commit_radios
         outer_frame.commit_radio_var = commit_radio_var
+        outer_frame.repo = repo
+        outer_frame.any_valid_commits = any_valid_commits
 
         return outer_frame
+
+    def update_commands(self):
+        self.sync_commands = []
+
+        self.cmds_txt['state'] = tk.NORMAL
+        self.cmds_txt.delete(1.0, tk.END)
+
+        first_time = True
+
+        for repo_frame in self.repo_frames:
+            repo = repo_frame.repo
+
+            if not first_time:
+                self.cmds_txt.insert(tk.END, '\n')
+            first_time = False
+
+            # Check "valid commits" first since this implies "disabled", and we
+            # want to give the most info.
+            if not repo_frame.any_valid_commits:
+                skip_txt = '# no valid commits in repo ' + repo.top_sub.name
+                self.cmds_txt.insert(tk.END, '%s\n' % skip_txt)
+                continue
+            if not repo_frame.name_chkbtn_var.get():
+                skip_txt = '# skipping disabled repo ' + repo.top_sub.name
+                self.cmds_txt.insert(tk.END, '%s\n' % skip_txt)
+                continue
+
+            display_txt = '# updating repo ' + repo.top_sub.name
+            self.cmds_txt.insert(tk.END, '%s\n' % display_txt)
+            path = os.path.join(
+                self.flatter.get_last_path(),
+                repo.top_sub.path)
+
+            cd_txt = 'cd ' + path
+            self.sync_commands.append(cd_txt)
+            self.cmds_txt.insert(tk.END, '%s\n' % cd_txt)
+
+            commit_idx = repo_frame.commit_radio_var.get()
+            commit = repo_frame.commit_radios[commit_idx].commit
+
+            checkout_txt = 'git checkout %s' % commit.hash
+            self.sync_commands.append(checkout_txt)
+            self.cmds_txt.insert(tk.END, '%s\n' % checkout_txt)
+
+        if not self.repo_frames:
+            self.cmds_txt.insert(tk.END, '# Nothing needs updating.\n')
+
+        self.cmds_txt['state'] = tk.DISABLED
 
 
 class SubmodFrame(tk.Frame):
@@ -1457,13 +1559,14 @@ class FlatterWin:
 
         self.init_menu()
 
-        button_frame = tk.Frame(root, bg=bg_color)
-        button_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+        # Might want to add this button frame back in the future. -- jbl
+        # button_frame = tk.Frame(root, bg=bg_color)
+        # button_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
 
-        fetch_top_subs_btn = tk.Button(button_frame,
-            text='Fetch Immediate\nSubmodules',
-            command=self.fetch_immediate_submodules)
-        fetch_top_subs_btn.pack(side=tk.TOP, fill=tk.X)
+        # fetch_top_subs_btn = tk.Button(button_frame,
+        #     text='Fetch Immediate\nSubmodules',
+        #     command=self.fetch_immediate_submodules)
+        # fetch_top_subs_btn.pack(side=tk.TOP, fill=tk.X)
 
         pane1 = ttk.PanedWindow(orient=tk.VERTICAL)
         pane1.pack(fill=tk.BOTH, expand=True)
@@ -1503,6 +1606,11 @@ class FlatterWin:
         file_menu.add_cascade(label='Open Recent', menu=open_recents_menu)
         file_menu.add_command(
             label='Refresh', command=self.refresh_repo, state='disabled')
+        file_menu.add_command(
+            label='Clear Console', command=self.clear_console)
+        file_menu.add_command(
+            label='Fetch Top Level Submodules',
+            command=self.fetch_immediate_submodules)
         file_menu.add_separator()
         file_menu.add_command(label='Exit', command=self.on_destroy)
 
@@ -1601,6 +1709,7 @@ class FlatterWin:
         if do_scroll:
             self.console.see(tk.END)
         self.console['state'] = tk.DISABLED
+        self.root.update_idletasks()
 
     def fetch_immediate_submodules(self):
         def do_work():
