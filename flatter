@@ -90,15 +90,19 @@ class DoInExistingDir(object):
         os.chdir(self._old_dir)
         return isinstance(value, OSError)
 
-def exec_proc(cmd, capture_output=True, console=None):
+def exec_proc(cmd, capture_output=True, console=None, dry_run=False):
     sys.stdout.flush()
     sys.stderr.flush()
 
     shell = type(cmd) == str
 
     if console:
+        prefix = 'dry run: ' if dry_run else 'exec cmd: '
         cmd_txt = cmd if shell else ' '.join(cmd)
-        console.write('exec cmd: ' + cmd_txt)
+        console.write(prefix + cmd_txt)
+
+    if dry_run:
+        return (0, '', '')
 
     if capture_output:
         p = subprocess.Popen(
@@ -112,6 +116,24 @@ def exec_proc(cmd, capture_output=True, console=None):
         return p.returncode, out, err
     else:
         return subprocess.call(cmd, shell=shell)
+
+
+def do_long_job(root, work_fn):
+    # Calling root.update() after setting the cursor is supposed to allow
+    # the new cursor to take effect, but it doesn't so I decided to use
+    # root.after(), which works, but the timeout has to be set high enough.
+    # 1 ms did not work; 10 ms worked rarely; 50 ms seems to work every
+    # time.
+    # Note: The cursor set by the Text Widgets can conflict with the wait
+    # cursor. E.g. if the user clicks the "Refresh" menu item while a text
+    # box is directly below the mouse cursor, then after the menu goes away,
+    # the text box with switch the cursor to the I-beam one, and it'll be in
+    # that state until the task is done. Not sure how to fix that...
+    root.config(cursor='wait')
+    def inner_work_fn():
+        work_fn()
+        root.config(cursor='')
+    root.after(50, inner_work_fn)
 
 
 def remove_commit_descr_prefix(descr):
@@ -337,6 +359,9 @@ class Flatter:
             self._console.write(text)
         else:
             print(text)
+
+    def get_console(self):
+        return self._console
 
     def get_is_open(self):
         return self._is_open
@@ -909,7 +934,7 @@ class ScrollableFrame(tk.Frame):
 
         set_up_wheel_scrolling(canvas)
 
-class InfoBox:
+class InfoDlg:
 
     root = None
 
@@ -925,7 +950,7 @@ class InfoBox:
             my_class.txt_font_italic = my_class.txt_font.copy()
             my_class.txt_font_italic['slant'] = 'italic'
 
-        dlg = tk.Toplevel(InfoBox.root)
+        dlg = tk.Toplevel(InfoDlg.root)
         dlg.wm_title('Details')
         dlg['bd'] = 5
 
@@ -1096,7 +1121,7 @@ class InfoBox:
             elif checked_out_relation == CommitDirection.MISSING:
                 make_relation_note(MISSING_TXT, '')
 
-        center_on(dlg, InfoBox.root)
+        center_on(dlg, InfoDlg.root)
 
         # make the dialog modal
         dlg.focus_set()
@@ -1106,16 +1131,18 @@ class InfoBox:
         self.dlg = dlg
 
 
-class SyncBox:
+class SyncDlg:
 
     root = None
 
     def __init__(self, submodule, flatter):
         self.flatter = flatter
+        self.did_execute_commands = False
 
         my_class = self.__class__
 
-        dlg = tk.Toplevel(SyncBox.root)
+        dlg = tk.Toplevel(SyncDlg.root)
+        self.dlg = dlg
         dlg.wm_title('Sync Top')
         dlg['bd'] = 2
 
@@ -1133,9 +1160,17 @@ class SyncBox:
         dlg.rowconfigure(row, weight=2)
         row += 1
 
-        tk.Label(dlg, text='Commands:', anchor=tk.W).grid(
-            row=row, column=0, sticky=tk.EW, pady=(5, 0))
+        frm = tk.Frame(dlg, bd=5)
+        frm.grid(row=row, column=0, sticky=tk.NSEW)
         row += 1
+
+        tk.Label(frm, text='Commands:', anchor=tk.W).pack(side=tk.LEFT)
+
+        exec_cmds_btn = tk.Button(frm,
+            text='Execute Commands',
+            command=self.execute_commands)
+        exec_cmds_btn.pack(side=tk.RIGHT)
+        self.exec_cmds_btn = exec_cmds_btn
 
         cmds_frame = tk.Frame(dlg)
 
@@ -1151,7 +1186,7 @@ class SyncBox:
         dlg.rowconfigure(row, weight=1)
         row += 1
 
-        center_on(dlg, SyncBox.root)
+        center_on(dlg, SyncDlg.root)
 
         self.dlg = dlg
 
@@ -1170,6 +1205,9 @@ class SyncBox:
         dlg.focus_set()
         dlg.grab_set()
         dlg.wait_window()
+
+    def executed_commands(self):
+        return self.did_execute_commands
 
     def create_syncable_frame(self, repo, parent):
         def on_name_chkbtn_changed():
@@ -1288,16 +1326,54 @@ class SyncBox:
         if not self.repo_frames:
             self.cmds_txt.insert(tk.END, '# Nothing needs updating.\n')
 
+        self.exec_cmds_btn['state'] = (
+            tk.NORMAL if self.sync_commands else tk.DISABLED)
+
         self.cmds_txt['state'] = tk.DISABLED
+
+    def execute_commands(self):
+        do_long_job(self.dlg, self.do_execute_commands)
+
+    def do_execute_commands(self):
+        self.flatter.write_console('=== SYNC COMMANDS START ===')
+
+        cmds_by_dir = collections.OrderedDict()
+        cmds_by_dir['.'] = []
+        for cmd in self.sync_commands:
+            if cmd.startswith('cd '):
+                cmds_by_dir[cmd[3:]] = []
+            else:
+                last_key = next(reversed(cmds_by_dir))
+                cmds_by_dir[last_key].append(cmd)
+
+        console = self.flatter.get_console()
+        for (path, cmds) in cmds_by_dir.items():
+            if not cmds:
+                continue
+
+            self.flatter.write_console('cd ' + path)
+            with DoInExistingDir(path) as ctx:
+                if ctx:
+                    for cmd in cmds:
+                        exec_proc(cmd, console=console)
+                        self.did_execute_commands = True
+                else:
+                    self.flatter.write_console(
+                        '*** ERROR - could not change to directory: ' + path)
+
+        self.flatter.write_console('=== SYNC COMMANDS END ===')
+
+        self.dlg.after(1, self.dlg.destroy)
 
 
 class SubmodFrame(tk.Frame):
-    def __init__(self, submodule, flatter, *args, **kwargs):
+    def __init__(self, submodule, flatter, refresh_fn, *args, **kwargs):
         my_class = self.__class__
 
         super(SubmodFrame, self).__init__(*args, **kwargs)
         self.submodule = submodule
         self.flatter = flatter
+        self.refresh_fn = refresh_fn
 
         if not hasattr(my_class, 'txt_font'):
             default_font = tk.font.nametofont('TkDefaultFont')
@@ -1393,7 +1469,7 @@ class SubmodFrame(tk.Frame):
         subs_frame.pack(anchor='nw')
 
         for child in submodule.subs:
-            frm = SubmodFrame(child, self.flatter, subs_frame)
+            frm = SubmodFrame(child, flatter, self.refresh_fn, subs_frame)
 
         self.pack(anchor=tk.NW, pady=(20, 0))
 
@@ -1411,19 +1487,24 @@ class SubmodFrame(tk.Frame):
         info_btn.pack(side=tk.LEFT, fill=tk.BOTH)
 
     def create_relation_labels(self, parent, submodule):
+        def is_interesting(rel):
+            return (
+                rel != CommitDirection.NONE
+                and rel != CommitDirection.MATCHES)
+        idx_interesting = is_interesting(submodule.relation_to_top_indexed)
+        co_interesting = is_interesting(submodule.relation_to_top_checked_out)
+
+        if not idx_interesting and not co_interesting:
+            return
+
         frm = tk.Frame(parent)
 
         def make_relation_lbl(relation, commit_type_txt):
-            if (relation == CommitDirection.NONE
-                or relation == CommitDirection.MATCHES):
-                return None
-
             lbl = tk.Label(frm,
-                anchor=tk.E,
                 borderwidth=1,
                 relief='solid',
-                pady=4)
-            lbl['bg'] = 'yellow3'
+                pady=4,
+                bg='yellow3')
             if relation == CommitDirection.AHEAD:
                 lbl['text'] = 'AHEAD of %s commit' % commit_type_txt
             elif relation == CommitDirection.BEHIND:
@@ -1432,21 +1513,21 @@ class SubmodFrame(tk.Frame):
                 lbl['text'] = 'ADJACENT to %s commit' % commit_type_txt
             elif relation == CommitDirection.MISSING:
                 lbl['text'] = 'Repo commit MISSING'
+            elif relation == CommitDirection.MATCHES:
+                lbl['text'] = 'MATCHES %s commit' % commit_type_txt
+                lbl['bg'] = 'chartreuse3'
             else:
                 lbl['text'] = ''
+                lbl['bg'] = 'dark grey'
 
             return lbl
 
         idx_lbl = make_relation_lbl(submodule.relation_to_top_indexed, 'IDX')
         co_lbl = make_relation_lbl(submodule.relation_to_top_checked_out, 'CO')
 
-        if idx_lbl:
-            idx_lbl.grid(row=0, column=0, sticky='nsew')
-        if co_lbl:
-            co_lbl.grid(row=1, column=0, sticky='nsew')
-
-        if idx_lbl or co_lbl:
-            frm.pack(side=tk.LEFT)
+        idx_lbl.grid(row=0, column=0, sticky='nsew')
+        co_lbl.grid(row=1, column=0, sticky='nsew')
+        frm.pack(side=tk.LEFT)
 
     def on_border_canvas_cfg(self, event):
         left = 2
@@ -1467,17 +1548,20 @@ class SubmodFrame(tk.Frame):
             width=2, outline=outline, dash=dash, tag='border_line')
 
     def show_submodule_info(self, submodule):
-        InfoBox(submodule)
+        InfoDlg(submodule)
 
     def sync_to_top(self, submodule):
-        SyncBox(submodule, self.flatter)
+        dlg = SyncDlg(submodule, self.flatter)
+        if dlg.executed_commands() and self.refresh_fn:
+            self.refresh_fn()
 
 
 class GraphFrame(tk.Frame):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, refresh_fn=None):
         tk.Frame.__init__(self, parent)
 
         self.flatter = None
+        self.refresh_fn = refresh_fn
         self.submod_frames = []
 
         self.init_canvas()
@@ -1521,7 +1605,7 @@ class GraphFrame(tk.Frame):
         root_sub = flatter.get_root_sub()
 
         for sub in root_sub.subs:
-            frm = SubmodFrame(sub, self.flatter, self.main_frm)
+            frm = SubmodFrame(sub, self.flatter, self.refresh_fn, self.main_frm)
             self.submod_frames.append(frm)
 
 
@@ -1539,8 +1623,8 @@ class FlatterWin:
             root = tk.Tk()
             root['bg'] = 'light grey'
 
-        InfoBox.root = root
-        SyncBox.root = root
+        InfoDlg.root = root
+        SyncDlg.root = root
 
         bg_color = root['bg']
         self.root = root
@@ -1571,7 +1655,7 @@ class FlatterWin:
         pane1 = ttk.PanedWindow(orient=tk.VERTICAL)
         pane1.pack(fill=tk.BOTH, expand=True)
 
-        self.graph_frame = GraphFrame(pane1)
+        self.graph_frame = GraphFrame(pane1, self.refresh_repo)
 
         console_frame = tk.Frame(pane1)
 
@@ -1648,22 +1732,10 @@ class FlatterWin:
         if path:
             self.open_dir(path)
 
-    def do_long_job(self, work_fn):
-        # Calling root.update() after setting the cursor is supposed to allow
-        # the new cursor to take effect, but it doesn't so I decided to use
-        # root.after(), which works, but the timeout has to be set high enough.
-        # 1 ms did not work; 10 ms worked rarely; 50 ms seems to work every
-        # time.
-        self.root.config(cursor='wait')
-        def inner_work_fn():
-            work_fn()
-            self.root.config(cursor='')
-        self.root.after(50, inner_work_fn)
-
     def refresh_repo(self):
         def do_work():
             self.open_dir(self.flatter.get_last_path())
-        self.do_long_job(do_work)
+        do_long_job(self.root, do_work)
 
     def open_dir(self, path, from_recent=False):
         if not path:
@@ -1715,7 +1787,7 @@ class FlatterWin:
         def do_work():
             self.flatter.fetch_immediate_submodules()
             self.open_dir(self.flatter.get_last_path())
-        self.do_long_job(do_work)
+        do_long_job(self.root, do_work)
 
 if __name__ == '__main__':
     FlatterWin()
