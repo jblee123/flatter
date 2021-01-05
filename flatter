@@ -27,7 +27,9 @@
 try:
     import tkinter as tk
 except ModuleNotFoundError:
-    sys.exit('error: tkinter not found. You may need to "pip install tk".')
+    sys.exit(
+        'error: tkinter not found. '
+        'You may need to "sudo apt-get install python3-tk".')
 
 import collections
 import configparser
@@ -889,7 +891,7 @@ def center_on(window, target):
     y = int(target.winfo_y() + (target.winfo_height() / 2 - height / 2))
     y = max(y, 0)
 
-    window.geometry(f"{width}x{height}+{x}+{y}")
+    window.geometry('%dx%d+%d+%d' % (width, height, x, y))
 
 
 def set_up_wheel_scrolling(canvas):
@@ -1428,10 +1430,11 @@ class SubmodFrame(tk.Frame):
             txt_len_chars = math.ceil(txt_len_pix / o_len_pix)
             return txt_len_chars
 
+        BOLD_LEN_FACTOR = 1.1
         text = make_text()
         text.insert('end', submodule.name, 'bold')
         text['state'] = tk.DISABLED
-        text['width'] = get_fit_text_width(text)
+        text['width'] = math.ceil(get_fit_text_width(text) * BOLD_LEN_FACTOR)
         text.pack(anchor=tk.W)
 
         text = make_text()
@@ -1443,11 +1446,15 @@ class SubmodFrame(tk.Frame):
         text.insert('end', 'Idx commit: %s' % indexed_str)
 
         if submodule.initialized:
-            checked_out_str = submodule.checked_out_hash[:8]
-            if submodule.checked_out_descr:
-                descr = remove_commit_descr_prefix(submodule.checked_out_descr)
-                checked_out_str += ' (%s)' % descr
-            text.insert('end', ', Checked out: %s' % checked_out_str)
+            if submodule.indexed_hash == submodule.checked_out_hash:
+                text.insert('end', ', CO matches idx commit')
+            else:
+                checked_out_str = submodule.checked_out_hash[:8]
+                if submodule.checked_out_descr:
+                    descr = remove_commit_descr_prefix(
+                        submodule.checked_out_descr)
+                    checked_out_str += ' (%s)' % descr
+                text.insert('end', ', CO: %s' % checked_out_str)
         else:
             descr = 'derived' if submodule.derived else 'uninitialized'
             text.insert('end', ', ')
@@ -1673,8 +1680,6 @@ class FlatterWin:
         pane1.add(console_frame)
         pane1.update()
         pane1.sashpos(0, top_height)
-
-        root.after(50, lambda: self.open_dir('D:/code/flatter/test_repos/blee/app1')) # jbltemp
 
         root.mainloop()
 
