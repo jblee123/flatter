@@ -828,11 +828,20 @@ class Flatter:
 
     def calc_syncable_to_top_data(self, submodule):
         all_subs_list = self.collect_submodules_list(submodule)
-        all_subs_list = [sub for sub in all_subs_list
-            if self.sub_exists_at_top_level(sub)]
+
+        filtered_subs = []
+        top_level_sub_names = []
+        missing_at_top_level_names = []
+        for sub in all_subs_list:
+            exists_at_top = self.sub_exists_at_top_level(sub)
+            if exists_at_top and (sub == self._top_subs[sub.name]):
+                top_level_sub_names.append(sub.name)
+            elif not exists_at_top:
+                missing_at_top_level_names.append(sub.name)
+            else:
+                filtered_subs.append(sub)
+        all_subs_list = filtered_subs
         unique_names = set([sub.name for sub in all_subs_list])
-        top_level_sub_names = [sub.name for sub in all_subs_list
-            if sub == self._top_subs[sub.name]]
 
         syncable_repos = dict(
             [(name, SyncableRepo(self._top_subs[name]))
@@ -854,34 +863,26 @@ class Flatter:
         for name in bad_repo_names:
             syncable_repos.pop(name)
 
-        filtered_names = []
+        up_to_date_names = []
         for repo in syncable_repos.values():
             top_sub = self._top_subs[repo.top_sub.name]
-
-            # The user selected a tree of submodules to updated, on of which may
-            # have been top-level if the user chose to sync a root downward.
-            # However, we never want to update that top-level submodule since
-            # we'd effectively be updating it to itself (so no need). At this
-            # point, however, we only have references to top-level subs since
-            # the non-top-level ones have been mapped to their analogous
-            # top-level subs. That's why we stored the name of the at-most-one
-            # original top-level sub above (where we knew what it was) -- so we
-            # could filter it out here.
-            if repo.top_sub.name in top_level_sub_names:
-                filtered_names.append(repo.top_sub.name)
-                continue
 
             can_only_update_to_what_is_already_there = (
                 len(repo.commits) == 1
                 and top_sub.checked_out_hash == repo.commits[0].hash)
             if can_only_update_to_what_is_already_there:
-                filtered_names.append(repo.top_sub.name)
+                up_to_date_names.append(repo.top_sub.name)
                 continue
 
-        for name in filtered_names:
+        for name in up_to_date_names:
             syncable_repos.pop(name)
 
-        return list(syncable_repos.values())
+        return (
+            list(syncable_repos.values()),
+            top_level_sub_names,
+            missing_at_top_level_names,
+            up_to_date_names,
+        )
 
 
 def center_on(window, target):
@@ -1197,8 +1198,17 @@ class SyncDlg:
 
         self.dlg = dlg
 
-        repos = flatter.calc_syncable_to_top_data(submodule)
+        (
+            repos,
+            top_level_sub_names,
+            missing_at_top_level_names,
+            up_to_date_names,
+        ) = flatter.calc_syncable_to_top_data(submodule)
+
         repos = sorted(repos, key=lambda repo: repo.top_sub.name)
+        self.top_level_sub_names = sorted(top_level_sub_names)
+        self.missing_at_top_level_names = sorted(missing_at_top_level_names)
+        self.up_to_date_names = sorted(up_to_date_names)
 
         self.repo_frames = []
         for repo in repos:
@@ -1293,14 +1303,44 @@ class SyncDlg:
         self.cmds_txt['state'] = tk.NORMAL
         self.cmds_txt.delete(1.0, tk.END)
 
-        first_time = True
+        add_blank = False
+
+        if not self.repo_frames:
+            self.cmds_txt.insert(tk.END, '# Nothing needs updating.\n')
+            add_blank = True
+
+        if self.top_level_sub_names:
+            if add_blank:
+                self.cmds_txt.insert(tk.END, '\n')
+            self.cmds_txt.insert(tk.END, '# skipping because is top-level:\n')
+            for name in self.top_level_sub_names:
+                self.cmds_txt.insert(tk.END, '#   %s\n' % name)
+            add_blank = True
+
+        if self.missing_at_top_level_names:
+            if add_blank:
+                self.cmds_txt.insert(tk.END, '\n')
+            self.cmds_txt.insert(
+                tk.END, '# skipping because missing at top-level:\n')
+            for name in self.missing_at_top_level_names:
+                self.cmds_txt.insert(tk.END, '#   %s\n' % name)
+            add_blank = True
+
+        if self.up_to_date_names:
+            if add_blank:
+                self.cmds_txt.insert(tk.END, '\n')
+            self.cmds_txt.insert(
+                tk.END, '# skipping because already up-to-date:\n')
+            for name in self.up_to_date_names:
+                self.cmds_txt.insert(tk.END, '#   %s\n' % name)
+            add_blank = True
 
         for repo_frame in self.repo_frames:
             repo = repo_frame.repo
 
-            if not first_time:
+            if add_blank:
                 self.cmds_txt.insert(tk.END, '\n')
-            first_time = False
+            add_blank = True
 
             # Check "valid commits" first since this implies "disabled", and we
             # want to give the most info.
@@ -1329,9 +1369,6 @@ class SyncDlg:
             checkout_txt = 'git checkout %s' % commit.hash
             self.sync_commands.append(checkout_txt)
             self.cmds_txt.insert(tk.END, '%s\n' % checkout_txt)
-
-        if not self.repo_frames:
-            self.cmds_txt.insert(tk.END, '# Nothing needs updating.\n')
 
         self.exec_cmds_btn['state'] = (
             tk.NORMAL if self.sync_commands else tk.DISABLED)
