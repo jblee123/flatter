@@ -131,7 +131,8 @@ def do_long_job(root, work_fn):
     # box is directly below the mouse cursor, then after the menu goes away,
     # the text box with switch the cursor to the I-beam one, and it'll be in
     # that state until the task is done. Not sure how to fix that...
-    root.config(cursor='wait')
+    WAIT_CURSOR = 'wait' if (os.name == 'nt') else 'watch'
+    root.config(cursor=WAIT_CURSOR)
     def inner_work_fn():
         work_fn()
         root.config(cursor='')
@@ -896,7 +897,11 @@ def center_on(window, target):
 
 def set_up_wheel_scrolling(canvas):
     def on_mousewheel(event):
-        delta = 1 if event.delta > 0 else -1
+        # Look at both 'delta' (for windows) and 'num' (for linux).
+        if event.delta > 0 or event.num == 4:
+            delta = 1
+        elif event.delta < 0 or event.num == 5:
+            delta = -1
         canvas.yview_scroll(-delta, 'units')
 
     def bound_to_mousewheel(event):
